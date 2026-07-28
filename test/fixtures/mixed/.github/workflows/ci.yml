@@ -1,0 +1,10 @@
+name: Fixture CI
+
+on:
+  pull_request:
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo fixture

@@ -1,0 +1,9 @@
+{
+  "name": "repolens-example-fixture",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "build": "node --version",
+    "lint": "node --check src/index.js"
+  }
+}
