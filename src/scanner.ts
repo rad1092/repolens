@@ -8,6 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { minimatch } from "minimatch";
 import semver from "semver";
 
 import {
@@ -38,6 +39,11 @@ interface GitHubCoordinates {
 
 interface GitHubRepositoryResponse {
   default_branch?: string;
+  security_and_analysis?: {
+    dependabot_security_updates?: {
+      status?: string;
+    };
+  };
 }
 
 interface GitHubReleaseResponse {
@@ -49,6 +55,28 @@ interface GitHubReleaseResponse {
 
 interface GitHubSearchResponse {
   total_count?: number;
+}
+
+interface GitHubRulesetResponse {
+  target?: string;
+  enforcement?: string;
+  conditions?: {
+    ref_name?: {
+      include?: string[];
+    };
+  };
+}
+
+interface GitHubMetadata {
+  defaultBranch: string | null;
+  branchProtected: boolean | null;
+  dependabotSecurityUpdates: boolean | null;
+  release: ReleaseInfo | null;
+  issues: number | null;
+  pullRequests: number | null;
+  available: string[];
+  unavailable: string[];
+  unknownReasons: string[];
 }
 
 const TEXT_EXTENSIONS = new Set([
@@ -105,6 +133,16 @@ const SAFE_ENV_EXAMPLES = new Set([
 
 function normalizePath(path: string): string {
   return path.split(sep).join("/");
+}
+
+function isExcludedPath(path: string, patterns: string[]): boolean {
+  return patterns.some((pattern) =>
+    minimatch(path, pattern, {
+      dot: true,
+      matchBase: !pattern.includes("/"),
+      nocase: false,
+    }),
+  );
 }
 
 function githubCoordinates(input: string): GitHubCoordinates | null {
@@ -340,6 +378,13 @@ function isContributingFile(path: string): boolean {
   return /^(?:\.github\/)?contributing(?:\.[^/]+)?$/i.test(path);
 }
 
+function isDependencyUpdateFile(path: string): boolean {
+  return (
+    /^\.github\/dependabot\.ya?ml$/i.test(path) ||
+    /^(?:renovate\.json5?|\.renovaterc(?:\.json5?)?)$/i.test(path)
+  );
+}
+
 function isTrackedEnvRisk(path: string): boolean {
   const name = basename(path).toLowerCase();
   if (SAFE_ENV_EXAMPLES.has(name)) return false;
@@ -384,9 +429,10 @@ async function scanTodos(
   root: string,
   files: string[],
   maxMatches: number,
-): Promise<{ matches: TodoMatch[]; total: number }> {
+): Promise<{ matches: TodoMatch[]; total: number; filesScanned: number }> {
   const matches: TodoMatch[] = [];
   let total = 0;
+  let filesScanned = 0;
 
   for (const path of files) {
     if (!shouldScanText(path) || isTrackedEnvRisk(path)) continue;
@@ -402,6 +448,7 @@ async function scanTodos(
 
     const content = await readFile(absolute, "utf8").catch(() => null);
     if (content === null || content.includes("\0")) continue;
+    filesScanned += 1;
 
     const lines = content.split(/\r?\n/);
     for (let index = 0; index < lines.length; index += 1) {
@@ -436,7 +483,35 @@ async function scanTodos(
     }
   }
 
-  return { matches, total };
+  return { matches, total, filesScanned };
+}
+
+async function unpinnedActions(
+  root: string,
+  workflowFiles: string[],
+): Promise<Array<{ path: string; reference: string }>> {
+  const results: Array<{ path: string; reference: string }> = [];
+  for (const path of workflowFiles) {
+    const content = await readFile(join(root, path), "utf8").catch(() => null);
+    if (!content) continue;
+    for (const line of content.split(/\r?\n/)) {
+      const match = /^\s*(?:-\s*)?uses:\s*["']?([^"'#\s]+)["']?/i.exec(line);
+      const reference = match?.[1];
+      if (
+        !reference ||
+        reference.startsWith("./") ||
+        reference.startsWith("docker://")
+      ) {
+        continue;
+      }
+      const separator = reference.lastIndexOf("@");
+      const revision = separator >= 0 ? reference.slice(separator + 1) : "";
+      if (!/^[a-f0-9]{40}$/i.test(revision)) {
+        results.push({ path, reference });
+      }
+    }
+  }
+  return results;
 }
 
 async function packageInventory(
@@ -541,7 +616,7 @@ async function fetchJson<T>(
     : timeout;
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
-    "User-Agent": "RepoLens/0.1.1",
+    "User-Agent": "RepoLens/0.2.0",
     "X-GitHub-Api-Version": "2022-11-28",
   };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -555,16 +630,20 @@ async function fetchJson<T>(
   }
 }
 
+function unavailableReason(label: string, status: number): string {
+  if (status === 0) return `${label}: network request failed or timed out`;
+  if (status === 401) return `${label}: GitHub authentication failed`;
+  if (status === 403 || status === 429) {
+    return `${label}: GitHub permission or rate limit prevented inspection`;
+  }
+  return `${label}: GitHub API returned HTTP ${status}`;
+}
+
 async function githubMetadata(
   github: GitHubCoordinates,
   token: string | null,
   signal?: AbortSignal,
-): Promise<{
-  defaultBranch: string | null;
-  release: ReleaseInfo | null;
-  issues: number | null;
-  pullRequests: number | null;
-}> {
+): Promise<GitHubMetadata> {
   const apiRoot = `https://api.github.com/repos/${encodeURIComponent(github.owner)}/${encodeURIComponent(github.repo)}`;
   const issueQuery = encodeURIComponent(
     `repo:${github.owner}/${github.repo} is:issue is:open`,
@@ -573,8 +652,17 @@ async function githubMetadata(
     `repo:${github.owner}/${github.repo} is:pr is:open`,
   );
 
-  const [repository, release, issues, pulls] = await Promise.all([
-    fetchJson<GitHubRepositoryResponse>(apiRoot, token, signal),
+  const repository = await fetchJson<GitHubRepositoryResponse>(
+    apiRoot,
+    token,
+    signal,
+  );
+  const defaultBranch = repository.value?.default_branch ?? null;
+  const branchProtectionUrl = defaultBranch
+    ? `${apiRoot}/branches/${encodeURIComponent(defaultBranch)}/protection`
+    : null;
+
+  const [release, issues, pulls, branchProtection, rulesets] = await Promise.all([
     fetchJson<GitHubReleaseResponse>(`${apiRoot}/releases/latest`, token, signal),
     fetchJson<GitHubSearchResponse>(
       `https://api.github.com/search/issues?q=${issueQuery}&per_page=1`,
@@ -583,6 +671,18 @@ async function githubMetadata(
     ),
     fetchJson<GitHubSearchResponse>(
       `https://api.github.com/search/issues?q=${pullQuery}&per_page=1`,
+      token,
+      signal,
+    ),
+    branchProtectionUrl
+      ? fetchJson<Record<string, unknown>>(
+          branchProtectionUrl,
+          token,
+          signal,
+        )
+      : Promise.resolve({ status: 0, value: null }),
+    fetchJson<GitHubRulesetResponse[]>(
+      `${apiRoot}/rulesets?includes_parents=true`,
       token,
       signal,
     ),
@@ -601,8 +701,100 @@ async function githubMetadata(
         }
       : null;
 
+  const available: string[] = [];
+  const unavailable: string[] = [];
+  const unknownReasons: string[] = [];
+  if (repository.value) available.push("repository");
+  else {
+    unavailable.push("repository");
+    unknownReasons.push(
+      unavailableReason("repository metadata", repository.status),
+    );
+  }
+  if (release.value || release.status === 404) available.push("latest release");
+  else {
+    unavailable.push("latest release");
+    unknownReasons.push(
+      unavailableReason("latest release metadata", release.status),
+    );
+  }
+  if (typeof issues.value?.total_count === "number") {
+    available.push("open issues");
+  } else {
+    unavailable.push("open issues");
+    unknownReasons.push(unavailableReason("open issue count", issues.status));
+  }
+  if (typeof pulls.value?.total_count === "number") {
+    available.push("open pull requests");
+  } else {
+    unavailable.push("open pull requests");
+    unknownReasons.push(
+      unavailableReason("open pull request count", pulls.status),
+    );
+  }
+
+  let branchProtected: boolean | null = null;
+  const rulesetProtectsDefault =
+    Array.isArray(rulesets.value) &&
+    rulesets.value.some((ruleset) => {
+      if (
+        ruleset.target !== "branch" ||
+        !ruleset.enforcement ||
+        ruleset.enforcement === "disabled"
+      ) {
+        return false;
+      }
+      const includes = ruleset.conditions?.ref_name?.include ?? [];
+      return includes.some(
+        (item) =>
+          item === "~ALL" ||
+          item === "~DEFAULT_BRANCH" ||
+          item === `refs/heads/${defaultBranch ?? ""}`,
+      );
+    });
+  if (branchProtection.status === 200 || rulesetProtectsDefault) {
+    branchProtected = true;
+    available.push("branch protection");
+  } else if (
+    branchProtection.status === 404 &&
+    repository.value &&
+    Array.isArray(rulesets.value)
+  ) {
+    branchProtected = false;
+    available.push("branch protection");
+  } else if (branchProtectionUrl) {
+    unavailable.push("branch protection");
+    unknownReasons.push(
+      branchProtection.status !== 404
+        ? unavailableReason("classic branch protection", branchProtection.status)
+        : unavailableReason("repository rulesets", rulesets.status),
+    );
+  }
+
+  const dependabotStatus =
+    repository.value?.security_and_analysis?.dependabot_security_updates
+      ?.status;
+  const dependabotSecurityUpdates =
+    dependabotStatus === "enabled"
+      ? true
+      : dependabotStatus === "disabled"
+        ? false
+        : null;
+  if (dependabotSecurityUpdates === null) {
+    unavailable.push("Dependabot security updates");
+    if (repository.value) {
+      unknownReasons.push(
+        "Dependabot security update setting: insufficient repository metadata permission",
+      );
+    }
+  } else {
+    available.push("Dependabot security updates");
+  }
+
   return {
-    defaultBranch: repository.value?.default_branch ?? null,
+    defaultBranch,
+    branchProtected,
+    dependabotSecurityUpdates,
     release: normalizedRelease,
     issues:
       typeof issues.value?.total_count === "number"
@@ -612,6 +804,9 @@ async function githubMetadata(
       typeof pulls.value?.total_count === "number"
         ? pulls.value.total_count
         : null,
+    available,
+    unavailable,
+    unknownReasons,
   };
 }
 
@@ -667,7 +862,9 @@ async function outdatedDependencies(
 ): Promise<{
   outdated: OutdatedDependency[];
   attempted: boolean;
+  eligible: number;
   checked: number;
+  status: Inventory["dependencyCheck"]["status"];
   skippedReason: string | null;
 }> {
   const dependencies = await npmDependencies(root);
@@ -675,7 +872,9 @@ async function outdatedDependencies(
     return {
       outdated: [],
       attempted: false,
+      eligible: 0,
       checked: 0,
+      status: "not-applicable",
       skippedReason: "No npm dependencies were found.",
     };
   }
@@ -683,7 +882,11 @@ async function outdatedDependencies(
     return {
       outdated: [],
       attempted: false,
+      eligible: dependencies.filter((dependency) =>
+        supportsRegistryCheck(dependency.declared),
+      ).length,
       checked: 0,
+      status: "offline",
       skippedReason: "Offline mode was requested.",
     };
   }
@@ -691,6 +894,16 @@ async function outdatedDependencies(
   const supported = dependencies.filter((dependency) =>
     supportsRegistryCheck(dependency.declared),
   );
+  if (supported.length === 0) {
+    return {
+      outdated: [],
+      attempted: false,
+      eligible: 0,
+      checked: 0,
+      status: "not-applicable",
+      skippedReason: "No supported npm semver ranges were found.",
+    };
+  }
   const candidates = supported.slice(0, 100);
   const outdated: OutdatedDependency[] = [];
   let checked = 0;
@@ -704,7 +917,7 @@ async function outdatedDependencies(
           const response = await fetch(
             `https://registry.npmjs.org/${encodeURIComponent(dependency.name)}/latest`,
             {
-              headers: { "User-Agent": "RepoLens/0.1.1" },
+              headers: { "User-Agent": "RepoLens/0.2.0" },
               signal: options.signal
                 ? AbortSignal.any([options.signal, timeout])
                 : timeout,
@@ -728,15 +941,26 @@ async function outdatedDependencies(
   }
 
   outdated.sort((a, b) => a.name.localeCompare(b.name));
+  const complete = checked === supported.length && supported.length <= 100;
+  const status =
+    checked === 0
+      ? "unavailable"
+      : complete
+        ? "complete"
+        : "partial";
   return {
     outdated,
     attempted: true,
+    eligible: supported.length,
     checked,
+    status,
     skippedReason:
       supported.length > 100
         ? "Only the first 100 supported npm dependencies were checked."
-        : checked === 0
+        : status === "unavailable"
           ? "The npm registry was unavailable."
+          : status === "partial"
+            ? `${checked} of ${supported.length} eligible npm dependencies were checked.`
           : null,
   };
 }
@@ -746,14 +970,28 @@ export async function scanRepository(
   options: AuditOptions,
 ): Promise<Inventory> {
   const root = identity.localPath;
-  const { files, isGit } = await trackedFiles(root);
-  const [todos, packageJson, commit, branch, dependencyState] =
+  const { files: rawFiles, isGit } = await trackedFiles(root);
+  const excludes = options.excludes ?? [];
+  const excludedFiles = rawFiles.filter((path) =>
+    isExcludedPath(path, excludes),
+  );
+  const files = rawFiles.filter((path) => !isExcludedPath(path, excludes));
+  const workflowFiles = files.filter(isWorkflow);
+  const [
+    todos,
+    packageJson,
+    commit,
+    branch,
+    dependencyState,
+    actionReferences,
+  ] =
     await Promise.all([
       scanTodos(root, files, options.maxTodoMatches),
       packageInventory(root, files),
       isGit ? latestCommit(root, options.now) : Promise.resolve(null),
       isGit ? localDefaultBranch(root) : Promise.resolve(null),
       outdatedDependencies(root, options),
+      unpinnedActions(root, workflowFiles),
     ]);
 
   const largeFiles: Array<{ path: string; bytes: number }> = [];
@@ -769,11 +1007,16 @@ export async function scanRepository(
   }
   largeFiles.sort((a, b) => b.bytes - a.bytes || a.path.localeCompare(b.path));
 
-  let metadata = {
+  let metadata: GitHubMetadata = {
     defaultBranch: branch,
+    branchProtected: null,
+    dependabotSecurityUpdates: null,
     release: null as ReleaseInfo | null,
     issues: null as number | null,
     pullRequests: null as number | null,
+    available: [],
+    unavailable: [],
+    unknownReasons: [],
   };
   if (identity.github && !options.offline) {
     metadata = await githubMetadata(
@@ -784,12 +1027,30 @@ export async function scanRepository(
     metadata.defaultBranch ||= branch;
   }
 
+  const unknownReasons = [...metadata.unknownReasons];
+  if (
+    dependencyState.status === "unavailable" ||
+    dependencyState.status === "partial"
+  ) {
+    unknownReasons.push(
+      `npm dependency metadata: ${dependencyState.skippedReason ?? "inspection was incomplete"}`,
+    );
+  }
+  const githubStatus =
+    !identity.github
+      ? "not-applicable"
+      : options.offline
+        ? "offline"
+        : metadata.unavailable.length === 0
+          ? "complete"
+          : "partial";
+
   return {
     isGitRepository: isGit,
     trackedFiles: files,
     readmeFiles: files.filter(isReadme),
     licenseFiles: files.filter(isLicense),
-    workflowFiles: files.filter(isWorkflow),
+    workflowFiles,
     lockfiles: files.filter((path) => LOCKFILE_NAMES.has(basename(path))),
     packageJson,
     todoMatches: todos.matches,
@@ -798,16 +1059,40 @@ export async function scanRepository(
     trackedEnvFiles: isGit ? files.filter(isTrackedEnvRisk) : [],
     securityFiles: files.filter(isSecurityFile),
     contributingFiles: files.filter(isContributingFile),
+    dependencyUpdateFiles: files.filter(isDependencyUpdateFile),
+    unpinnedActions: actionReferences,
     latestCommit: commit,
     defaultBranch: metadata.defaultBranch,
+    branchProtected: metadata.branchProtected,
+    dependabotSecurityUpdates: metadata.dependabotSecurityUpdates,
     latestRelease: metadata.release,
     openIssues: metadata.issues,
     openPullRequests: metadata.pullRequests,
     outdatedDependencies: dependencyState.outdated,
     dependencyCheck: {
       attempted: dependencyState.attempted,
+      eligible: dependencyState.eligible,
       checked: dependencyState.checked,
+      status: dependencyState.status,
       skippedReason: dependencyState.skippedReason,
+    },
+    coverage: {
+      trackedFiles: rawFiles.length,
+      includedFiles: files.length,
+      excludedFiles: excludedFiles.length,
+      excludes: [...excludes],
+      todoTextFiles: todos.filesScanned,
+      dependencyPackages: {
+        eligible: dependencyState.eligible,
+        checked: dependencyState.checked,
+        status: dependencyState.status,
+      },
+      github: {
+        status: githubStatus,
+        available: metadata.available,
+        unavailable: metadata.unavailable,
+      },
+      unknownReasons,
     },
   };
 }

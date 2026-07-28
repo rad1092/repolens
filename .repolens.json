@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "excludes": [
+    "**/.repolens/**",
+    "**/fixtures/**",
+    "**/__fixtures__/**",
+    "**/testdata/**"
+  ],
+  "staleDays": 180,
+  "largeFileMB": 1,
+  "policy": {
+    "failOn": "critical",
+    "strict": false
+  }
+}

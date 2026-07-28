@@ -1,13 +1,20 @@
 {
-  "name": "repolens",
-  "version": "0.1.1",
+  "name": "@rad1092/repolens",
+  "version": "0.2.0",
   "description": "Read-only repository health audits for local and GitHub repositories.",
   "type": "module",
   "bin": {
     "repolens": "./dist/src/cli.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
   "files": [
     "dist/src",
+    ".repolens.schema.json",
     "README.md",
     "LICENSE"
   ],
@@ -16,11 +23,14 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:action": "esbuild src/action.ts --bundle --platform=node --target=node24 --format=cjs --outfile=action/index.cjs --legal-comments=none",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "check": "npm run clean && npm run test && npm run lint",
+    "check": "npm run clean && npm run test && npm run lint && npm run build:action",
+    "ci": "npm run check && git diff --exit-code -- action/index.cjs",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "example": "npm run build && node dist/src/cli.js test/fixtures/example --format html --output examples/index.html --offline"
+    "example": "npm run build && node dist/src/cli.js scan test/fixtures/example --format html --output repolens-report.html --offline",
+    "prepack": "npm run clean && npm run build"
   },
   "keywords": [
     "repository",
@@ -30,12 +40,25 @@
     "github"
   ],
   "license": "MIT",
+  "homepage": "https://github.com/rad1092/repolens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rad1092/repolens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rad1092/repolens/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
+    "minimatch": "^10.0.3",
     "semver": "^7.7.2"
   },
   "devDependencies": {
     "@types/node": "^22.18.6",
     "@types/semver": "^7.7.1",
+    "esbuild": "^0.25.10",
     "typescript": "^5.9.2"
   }
 }

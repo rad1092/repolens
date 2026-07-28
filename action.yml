@@ -1,0 +1,53 @@
+name: RepoLens
+description: Read-only repository maintenance triage with baseline-aware policy gates.
+author: rad1092
+
+branding:
+  icon: search
+  color: blue
+
+inputs:
+  target:
+    description: Repository path relative to GITHUB_WORKSPACE.
+    required: false
+    default: "."
+  config:
+    description: Optional .repolens.json path relative to GITHUB_WORKSPACE.
+    required: false
+    default: ""
+  baseline:
+    description: Optional RepoLens JSON baseline path relative to GITHUB_WORKSPACE.
+    required: false
+    default: ""
+  fail-on:
+    description: none, critical, warning, new-critical, or new-warning. Overrides config.
+    required: false
+    default: ""
+
+outputs:
+  score:
+    description: Secondary heuristic score from 0 to 100.
+  grade:
+    description: Secondary heuristic grade.
+  critical:
+    description: Current critical finding count.
+  warning:
+    description: Current warning finding count.
+  unknown:
+    description: Current unknown finding count.
+  new-critical:
+    description: New or worsened critical count, or current count without a baseline.
+  new-warning:
+    description: New or worsened warning count, or current count without a baseline.
+  passed:
+    description: Whether the configured maintenance policy passed.
+  report-json:
+    description: Absolute path to the JSON report.
+  report-html:
+    description: Absolute path to the standalone HTML report.
+  report-markdown:
+    description: Absolute path to the GitHub-flavored Markdown summary.
+
+runs:
+  using: node24
+  main: action/index.cjs

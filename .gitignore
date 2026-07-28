@@ -5,3 +5,4 @@ coverage/
 repolens-report.json
 repolens-report.html
 repolens-report.txt
+*.tgz

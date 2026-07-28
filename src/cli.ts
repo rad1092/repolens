@@ -1,24 +1,35 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
+import { parseFailOn, writeDefaultConfig } from "./config.js";
 import {
-  DEFAULT_LARGE_FILE_BYTES,
   DEFAULT_MAX_TODO_MATCHES,
-  DEFAULT_STALE_DAYS,
   TOOL_VERSION,
 } from "./constants.js";
-import { auditTarget } from "./audit.js";
-import { renderHtml, renderJson, renderTerminal } from "./reporters.js";
-import type { CliOptions } from "./types.js";
-
+import {
+  renderGitHubMarkdown,
+  renderHtml,
+  renderJson,
+  renderTerminal,
+} from "./reporters.js";
+import { runAudit } from "./runner.js";
+import type {
+  CliOptions,
+  InitCliOptions,
+  ReportFormat,
+  ScanCliOptions,
+} from "./types.js";
 const HELP = `RepoLens ${TOOL_VERSION}
-Read-only repository maintenance audits for local and GitHub repositories.
+Read-only maintenance triage for any local or GitHub repository.
 
 Usage:
-  repolens [target] [options]
+  repolens scan [target] [options]
+  repolens compare [target] --baseline <report.json> [options]
+  repolens init [directory] [--force]
 
 Targets:
   .                              Local repository (default)
@@ -26,27 +37,39 @@ Targets:
   owner/repository               GitHub repository
   https://github.com/owner/repo  GitHub repository URL
 
-Options:
-  -f, --format <value>       terminal, json, html, all, or a comma-separated list
-  -o, --output <path>       Write one report to a file or multiple reports to a directory
+Scan and compare options:
+  -f, --format <value>       terminal, json, html, github, all, or a list
+  -o, --output <path>       Write one report to a file or reports to a directory
+      --config <path>       Read an explicit .repolens.json
+      --baseline <path>     Compare with a RepoLens JSON report
+      --fail-on <policy>    none, critical, warning, new-critical, new-warning
+      --strict              Treat unknown inspection areas as exit 2
+      --no-strict           Keep unknown areas visible without exit 2
       --offline             Skip GitHub API and npm registry checks
       --token-env <name>    Environment variable containing a GitHub token
                             (default: GITHUB_TOKEN; tokens are never written)
-      --stale-days <days>   Warn when the latest commit is older (default: 180)
-      --large-file-mb <mb>  Large tracked-file threshold (default: 1)
+      --stale-days <days>   Override the configured commit age threshold
+      --large-file-mb <mb>  Override the configured tracked-file threshold
       --max-todos <count>   Maximum TODO/FIXME evidence rows (default: 50)
       --no-color            Disable ANSI colors
-  -h, --help                Show help
-  -v, --version             Show version
+
+Init options:
+      --force               Replace an existing .repolens.json
+
+Exit codes:
+  0  Inspection completed and policy passed
+  1  Inspection completed and policy failed
+  2  Configuration, network/permission in strict mode, or execution error
 
 Examples:
-  repolens .
-  repolens owner/repo --format all --output reports
-  repolens . --format html --output repolens-report.html --offline
+  repolens init
+  repolens scan .
+  repolens scan owner/repo --format all --output reports
+  repolens compare . --baseline .repolens/baselines/accepted.json --fail-on new-warning
 
 Safety:
-  Audits do not install dependencies, run repository scripts, or edit the target.
-  A token may only be read from an environment variable; --token is not accepted.
+  Scans do not install dependencies, run repository scripts, or edit the target.
+  init and explicit report output are the only repository-adjacent writes.
 `;
 
 function positiveNumber(value: string, option: string): number {
@@ -57,26 +80,22 @@ function positiveNumber(value: string, option: string): number {
   return parsed;
 }
 
-function parseFormats(
-  value: string,
-): Array<"terminal" | "json" | "html"> {
+function parseFormats(value: string): ReportFormat[] {
   const requested = value
     .split(",")
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
   const expanded = requested.includes("all")
-    ? ["terminal", "json", "html"]
+    ? ["terminal", "json", "html", "github"]
     : requested;
-  const allowed = new Set(["terminal", "json", "html"]);
+  const allowed = new Set(["terminal", "json", "html", "github"]);
   for (const format of expanded) {
     if (!allowed.has(format)) {
       throw new Error(`Unknown report format: ${format}`);
     }
   }
   if (expanded.length === 0) throw new Error("At least one format is required.");
-  return [
-    ...new Set(expanded as Array<"terminal" | "json" | "html">),
-  ];
+  return [...new Set(expanded as ReportFormat[])];
 }
 
 function optionValue(
@@ -86,7 +105,9 @@ function optionValue(
 ): { value: string; consumed: number } {
   const equals = argument.indexOf("=");
   if (equals >= 0) {
-    return { value: argument.slice(equals + 1), consumed: 0 };
+    const value = argument.slice(equals + 1);
+    if (!value) throw new Error(`${argument.slice(0, equals)} requires a value.`);
+    return { value, consumed: 0 };
   }
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
@@ -95,14 +116,43 @@ function optionValue(
   return { value, consumed: 1 };
 }
 
-export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
+function parseInit(args: string[]): InitCliOptions {
   let target = ".";
   let targetSeen = false;
-  let formats: Array<"terminal" | "json" | "html"> = ["terminal"];
+  let force = false;
+  for (const argument of args) {
+    if (argument === "--force") {
+      force = true;
+      continue;
+    }
+    if (argument === "-h" || argument === "--help") {
+      throw new Error('Use "repolens --help" for command help.');
+    }
+    if (argument.startsWith("-")) {
+      throw new Error(`Unknown init option: ${argument}`);
+    }
+    if (targetSeen) throw new Error("init accepts only one directory.");
+    target = argument;
+    targetSeen = true;
+  }
+  return { command: "init", target, force };
+}
+
+function parseScan(
+  command: "scan" | "compare",
+  args: string[],
+): ScanCliOptions {
+  let target = ".";
+  let targetSeen = false;
+  let formats: ReportFormat[] = ["terminal"];
   let output: string | null = null;
+  let configPath: string | null = null;
+  let baselinePath: string | null = null;
+  let failOn: ScanCliOptions["failOn"] = null;
+  let strict: boolean | null = null;
   let offline = false;
-  let staleDays = DEFAULT_STALE_DAYS;
-  let largeFileBytes = DEFAULT_LARGE_FILE_BYTES;
+  let staleDays: number | null = null;
+  let largeFileBytes: number | null = null;
   let maxTodoMatches = DEFAULT_MAX_TODO_MATCHES;
   let tokenEnv = "GITHUB_TOKEN";
   let noColor = false;
@@ -118,8 +168,6 @@ export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
       targetSeen = true;
       break;
     }
-    if (argument === "-h" || argument === "--help") return "help";
-    if (argument === "-v" || argument === "--version") return "version";
     if (argument === "--offline") {
       offline = true;
       continue;
@@ -128,72 +176,65 @@ export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
       noColor = true;
       continue;
     }
+    if (argument === "--strict") {
+      strict = true;
+      continue;
+    }
+    if (argument === "--no-strict") {
+      strict = false;
+      continue;
+    }
     if (argument === "--token" || argument.startsWith("--token=")) {
       throw new Error(
         "Raw tokens are not accepted. Put the token in an environment variable and use --token-env.",
       );
     }
-    if (
-      argument === "-f" ||
-      argument === "--format" ||
-      argument.startsWith("--format=")
-    ) {
+
+    const valuedOptions = new Set([
+      "-f",
+      "--format",
+      "-o",
+      "--output",
+      "--config",
+      "--baseline",
+      "--fail-on",
+      "--token-env",
+      "--stale-days",
+      "--large-file-mb",
+      "--max-todos",
+    ]);
+    const optionName = argument.includes("=")
+      ? argument.slice(0, argument.indexOf("="))
+      : argument;
+    if (valuedOptions.has(optionName)) {
       const parsed = optionValue(argument, args, index);
-      formats = parseFormats(parsed.value);
       index += parsed.consumed;
-      continue;
-    }
-    if (
-      argument === "-o" ||
-      argument === "--output" ||
-      argument.startsWith("--output=")
-    ) {
-      const parsed = optionValue(argument, args, index);
-      output = parsed.value;
-      index += parsed.consumed;
-      continue;
-    }
-    if (
-      argument === "--token-env" ||
-      argument.startsWith("--token-env=")
-    ) {
-      const parsed = optionValue(argument, args, index);
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(parsed.value)) {
-        throw new Error("--token-env must be a valid environment variable name.");
+      if (optionName === "-f" || optionName === "--format") {
+        formats = parseFormats(parsed.value);
+      } else if (optionName === "-o" || optionName === "--output") {
+        output = parsed.value;
+      } else if (optionName === "--config") {
+        configPath = parsed.value;
+      } else if (optionName === "--baseline") {
+        baselinePath = parsed.value;
+      } else if (optionName === "--fail-on") {
+        failOn = parseFailOn(parsed.value, "--fail-on");
+      } else if (optionName === "--token-env") {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(parsed.value)) {
+          throw new Error("--token-env must be a valid environment variable name.");
+        }
+        tokenEnv = parsed.value;
+      } else if (optionName === "--stale-days") {
+        staleDays = Math.floor(positiveNumber(parsed.value, "--stale-days"));
+      } else if (optionName === "--large-file-mb") {
+        largeFileBytes = Math.floor(
+          positiveNumber(parsed.value, "--large-file-mb") * 1024 * 1024,
+        );
+      } else if (optionName === "--max-todos") {
+        maxTodoMatches = Math.floor(
+          positiveNumber(parsed.value, "--max-todos"),
+        );
       }
-      tokenEnv = parsed.value;
-      index += parsed.consumed;
-      continue;
-    }
-    if (
-      argument === "--stale-days" ||
-      argument.startsWith("--stale-days=")
-    ) {
-      const parsed = optionValue(argument, args, index);
-      staleDays = Math.floor(positiveNumber(parsed.value, "--stale-days"));
-      index += parsed.consumed;
-      continue;
-    }
-    if (
-      argument === "--large-file-mb" ||
-      argument.startsWith("--large-file-mb=")
-    ) {
-      const parsed = optionValue(argument, args, index);
-      largeFileBytes = Math.floor(
-        positiveNumber(parsed.value, "--large-file-mb") * 1024 * 1024,
-      );
-      index += parsed.consumed;
-      continue;
-    }
-    if (
-      argument === "--max-todos" ||
-      argument.startsWith("--max-todos=")
-    ) {
-      const parsed = optionValue(argument, args, index);
-      maxTodoMatches = Math.floor(
-        positiveNumber(parsed.value, "--max-todos"),
-      );
-      index += parsed.consumed;
       continue;
     }
     if (argument.startsWith("-")) {
@@ -204,10 +245,18 @@ export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
     targetSeen = true;
   }
 
+  if (command === "compare" && !baselinePath) {
+    throw new Error("compare requires --baseline <report.json>.");
+  }
   return {
+    command,
     target,
     formats,
     output,
+    configPath,
+    baselinePath,
+    failOn,
+    strict,
     offline,
     staleDays,
     largeFileBytes,
@@ -215,6 +264,15 @@ export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
     tokenEnv,
     noColor,
   };
+}
+
+export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
+  if (args.includes("-h") || args.includes("--help")) return "help";
+  if (args.includes("-v") || args.includes("--version")) return "version";
+  const [first, ...rest] = args;
+  if (first === "init") return parseInit(rest);
+  if (first === "scan" || first === "compare") return parseScan(first, rest);
+  return parseScan("scan", args);
 }
 
 async function pathIsDirectory(path: string): Promise<boolean> {
@@ -232,9 +290,9 @@ async function writeSingleReport(path: string, content: string): Promise<void> {
   process.stderr.write(`RepoLens wrote ${absolute}\n`);
 }
 
-async function emitReports(
-  options: CliOptions,
-  report: Awaited<ReturnType<typeof auditTarget>>,
+export async function emitReports(
+  options: ScanCliOptions,
+  report: Awaited<ReturnType<typeof runAudit>>["report"],
 ): Promise<void> {
   const renderers = {
     terminal: () =>
@@ -246,21 +304,21 @@ async function emitReports(
       }),
     json: () => renderJson(report),
     html: () => renderHtml(report),
+    github: () => renderGitHubMarkdown(report),
   } as const;
   const extensions = {
     terminal: "txt",
     json: "json",
     html: "html",
+    github: "md",
   } as const;
 
   if (!options.output) {
     if (options.formats.length === 1) {
       const format = options.formats[0];
-      if (!format) return;
-      process.stdout.write(renderers[format]());
+      if (format) process.stdout.write(renderers[format]());
       return;
     }
-
     for (const format of options.formats) {
       if (format === "terminal") {
         process.stdout.write(renderers.terminal());
@@ -306,6 +364,11 @@ export async function runCli(args: string[]): Promise<number> {
     process.stdout.write(`${TOOL_VERSION}\n`);
     return 0;
   }
+  if (parsed.command === "init") {
+    const destination = await writeDefaultConfig(parsed.target, parsed.force);
+    process.stdout.write(`RepoLens wrote ${destination}\n`);
+    return 0;
+  }
 
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -313,36 +376,50 @@ export async function runCli(args: string[]): Promise<number> {
   process.once("SIGTERM", stop);
 
   try {
-    const token = process.env[parsed.tokenEnv] || null;
-    const report = await auditTarget(parsed.target, {
-      now: new Date(),
+    const result = await runAudit({
+      target: parsed.target,
+      configPath: parsed.configPath,
+      baselinePath: parsed.baselinePath,
+      failOn: parsed.failOn,
+      strict: parsed.strict,
+      offline: parsed.offline,
       staleDays: parsed.staleDays,
       largeFileBytes: parsed.largeFileBytes,
       maxTodoMatches: parsed.maxTodoMatches,
-      offline: parsed.offline,
-      githubToken: token,
+      githubToken: process.env[parsed.tokenEnv] || null,
       signal: controller.signal,
     });
-    await emitReports(parsed, report);
-    return 0;
+    await emitReports(parsed, result.report);
+    return result.exitCode;
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }
 }
 
-const isEntrypoint =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+function runningAsEntrypoint(): boolean {
+  const argument = process.argv[1];
+  if (!argument) return false;
+  try {
+    return (
+      realpathSync(argument) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
 
-if (isEntrypoint) {
+if (runningAsEntrypoint()) {
   runCli(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;
     })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`RepoLens: ${message}\nRun "repolens --help" for usage.\n`);
-      process.exitCode = 1;
+      process.stderr.write(
+        `RepoLens: ${message}\nRun "repolens --help" for usage.\n`,
+      );
+      process.exitCode = 2;
     });
 }

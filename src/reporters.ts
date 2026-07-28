@@ -5,6 +5,7 @@ const severityLabel: Record<Severity, string> = {
   info: "INFO",
   warning: "WARN",
   critical: "CRITICAL",
+  unknown: "UNKNOWN",
 };
 
 function ansi(enabled: boolean, code: number, value: string): string {
@@ -17,6 +18,7 @@ function terminalSeverity(enabled: boolean, severity: Severity): string {
     info: 36,
     warning: 33,
     critical: 31,
+    unknown: 35,
   };
   return ansi(enabled, colors[severity], severityLabel[severity]);
 }
@@ -52,13 +54,35 @@ export function renderTerminal(
 ): string {
   const github = report.repository.github?.url;
   const target = github ?? report.repository.input;
+  const status = report.policy.operationalError
+    ? "INCOMPLETE"
+    : report.policy.passed
+      ? "POLICY PASSED"
+      : "ACTION REQUIRED";
+  const comparisonLines = report.comparison.baseline
+    ? [
+        `New    ${report.comparison.new.critical} critical · ${report.comparison.new.warning} warning · ${report.comparison.new.unknown} unknown`,
+        `Fixed  ${report.comparison.resolved.critical} critical · ${report.comparison.resolved.warning} warning · ${report.comparison.resolved.unknown} unknown`,
+        `Base   ${report.comparison.baseline.generatedAt}  ${report.comparison.baseline.source}`,
+      ]
+    : [
+        `Now    ${report.counts.critical} critical · ${report.counts.warning} warning · ${report.counts.unknown} unknown`,
+        "Base   none; current findings are used by new-* policies",
+      ];
   const lines = [
     "",
     ansi(options.color, 1, `RepoLens ${report.tool.version}`),
     `${report.repository.name}  ${target}`,
     "",
-    `Score  ${terminalScore(options.color, report.score)}/100  Grade ${ansi(options.color, 1, report.grade)}`,
-    `       ${report.counts.critical} critical · ${report.counts.warning} warning · ${report.counts.pass} pass · ${report.counts.info} info`,
+    ansi(
+      options.color,
+      report.policy.passed ? 32 : report.policy.operationalError ? 35 : 31,
+      `Status ${status}`,
+    ),
+    ...comparisonLines,
+    `Policy ${report.policy.failOn}${report.policy.strict ? " · strict" : ""}`,
+    `Score  ${terminalScore(options.color, report.score)}/100 · Grade ${report.grade} (secondary heuristic)`,
+    `Scope  ${report.coverage.includedFiles}/${report.coverage.trackedFiles} files included · ${report.coverage.excludedFiles} excluded`,
     "",
     ansi(options.color, 1, "Repository checks"),
     "",
@@ -66,6 +90,16 @@ export function renderTerminal(
 
   for (const finding of report.findings) {
     lines.push(...terminalFinding(finding, options.color), "");
+  }
+
+  if (report.comparison.changes.length > 0) {
+    lines.push(ansi(options.color, 1, "Changes since baseline"), "");
+    for (const change of report.comparison.changes) {
+      lines.push(
+        `  ${change.kind.toUpperCase().padEnd(9)} ${change.title}: ${change.from ?? "absent"} → ${change.to ?? "absent"}${change.detail ? ` · ${change.detail}` : ""}`,
+      );
+    }
+    lines.push("");
   }
 
   lines.push(ansi(options.color, 1, "Improvement plan"), "");
@@ -88,6 +122,72 @@ export function renderTerminal(
 
 export function renderJson(report: AuditReport): string {
   return `${JSON.stringify(report, null, 2)}\n`;
+}
+
+function escapeMarkdown(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("|", "\\|")
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ");
+}
+
+export function renderGitHubMarkdown(report: AuditReport): string {
+  const status = report.policy.operationalError
+    ? "INCOMPLETE"
+    : report.policy.passed
+      ? "POLICY PASSED"
+      : "ACTION REQUIRED";
+  const lines = [
+    `## RepoLens · ${status}`,
+    "",
+    `**${escapeMarkdown(report.repository.name)}** · policy \`${report.policy.failOn}${report.policy.strict ? " · strict" : ""}\``,
+    "",
+  ];
+
+  if (report.comparison.baseline) {
+    lines.push(
+      `New since baseline: **${report.comparison.new.critical} critical**, **${report.comparison.new.warning} warning**, **${report.comparison.new.unknown} unknown**.`,
+      "",
+      `Baseline: ${escapeMarkdown(report.comparison.baseline.generatedAt)} · \`${escapeMarkdown(report.comparison.baseline.source)}\``,
+      "",
+    );
+  } else {
+    lines.push(
+      `Current: **${report.counts.critical} critical**, **${report.counts.warning} warning**, **${report.counts.unknown} unknown**.`,
+      "",
+    );
+  }
+
+  lines.push(
+    `Detection scope: ${report.coverage.includedFiles}/${report.coverage.trackedFiles} files included, ${report.coverage.excludedFiles} excluded; npm metadata ${report.coverage.dependencyPackages.checked}/${report.coverage.dependencyPackages.eligible}; GitHub metadata ${report.coverage.github.status}.`,
+    "",
+    "### Current actionable findings",
+    "",
+    "| Severity | Check | Result |",
+    "| --- | --- | --- |",
+  );
+  const actionable = report.findings.filter(
+    (item) =>
+      item.severity === "critical" ||
+      item.severity === "warning" ||
+      item.severity === "unknown",
+  );
+  if (actionable.length === 0) {
+    lines.push("| PASS | Maintenance queue | No actionable findings |");
+  } else {
+    for (const finding of actionable) {
+      lines.push(
+        `| ${severityLabel[finding.severity]} | ${escapeMarkdown(finding.title)} | ${escapeMarkdown(finding.summary)} |`,
+      );
+    }
+  }
+  lines.push(
+    "",
+    `<sub>Score ${report.score}/100 · Grade ${report.grade} is a secondary heuristic. Generated ${escapeMarkdown(report.generatedAt)}.</sub>`,
+    "",
+  );
+  return lines.join("\n");
 }
 
 function escapeHtml(value: unknown): string {
@@ -149,6 +249,34 @@ export function renderHtml(report: AuditReport): string {
               `<li><strong>${escapeHtml(item.action)}</strong><span>${escapeHtml(item.reason)}</span></li>`,
           )
           .join("")}</ol>`;
+  const status = report.policy.operationalError
+    ? "Incomplete"
+    : report.policy.passed
+      ? "Policy passed"
+      : "Action required";
+  const headlineCounts = report.comparison.baseline
+    ? report.comparison.new
+    : {
+        critical: report.counts.critical,
+        warning: report.counts.warning,
+        unknown: report.counts.unknown,
+      };
+  const comparisonMarkup = report.comparison.baseline
+    ? `<section aria-labelledby="changes-title">
+      <h2 id="changes-title">Changes since baseline</h2>
+      <p class="baseline">Compared with ${escapeHtml(report.comparison.baseline.generatedAt)} · <code>${escapeHtml(report.comparison.baseline.source)}</code></p>
+      ${
+        report.comparison.changes.length === 0
+          ? "<p>No actionable finding changed.</p>"
+          : `<ol class="changes">${report.comparison.changes
+              .map(
+                (change) =>
+                  `<li><strong>${escapeHtml(change.kind)}</strong><span>${escapeHtml(change.title)}${change.detail ? `<small>${escapeHtml(change.detail)}</small>` : ""}</span><code>${escapeHtml(change.from ?? "absent")} → ${escapeHtml(change.to ?? "absent")}</code></li>`,
+              )
+              .join("")}</ol>`
+      }
+    </section>`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -182,10 +310,11 @@ export function renderHtml(report: AuditReport): string {
     .eyebrow, .severity { font: 700 .72rem/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .07em; text-transform: uppercase; }
     h1 { margin: .4rem 0; font-size: clamp(2.8rem, 8vw, 7rem); line-height: .9; letter-spacing: -.055em; }
     .target { margin: 0; color: var(--muted); }
-    .score { display: grid; place-items: center; min-width: 10rem; aspect-ratio: 1; border: 2px solid currentColor; border-radius: 50%; color: var(--accent); }
-    .score strong { font-size: 3.2rem; line-height: 1; }
-    .score span { font-size: .75rem; font-weight: 700; text-transform: uppercase; }
-    .counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 0 0 4rem; background: var(--rule); border-bottom: 1px solid var(--rule); }
+    .status-card { min-width: 15rem; padding: 1.25rem; border: 2px solid currentColor; color: var(--accent); }
+    .status-card strong, .status-card span { display: block; }
+    .status-card strong { margin-top: .4rem; font-size: 1.65rem; line-height: 1; }
+    .status-card span { margin-top: .7rem; color: var(--muted); font-size: .78rem; }
+    .counts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; margin: 0 0 4rem; background: var(--rule); border-bottom: 1px solid var(--rule); }
     .counts div { padding: 1.1rem; background: var(--surface); }
     .counts strong { display: block; font-size: 1.6rem; }
     section { margin-top: 4rem; }
@@ -195,6 +324,7 @@ export function renderHtml(report: AuditReport): string {
     .finding-pass { border-left-color: var(--pass); }
     .finding-warning { border-left-color: var(--warn); }
     .finding-critical { border-left-color: var(--critical); }
+    .finding-unknown { border-left-color: #7e22ce; }
     .finding header { display: grid; grid-template-columns: auto 1fr auto; gap: 1rem; align-items: center; }
     .finding h3 { margin: 0; font-size: 1.05rem; }
     .finding > p { margin: .8rem 0 0; }
@@ -203,6 +333,7 @@ export function renderHtml(report: AuditReport): string {
     .finding-pass .severity { color: var(--pass); }
     .finding-warning .severity { color: var(--warn); }
     .finding-critical .severity { color: var(--critical); }
+    .finding-unknown .severity { color: #7e22ce; }
     .evidence { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45rem 1rem; margin: 1rem 0 0; }
     .evidence div { min-width: 0; padding-top: .45rem; border-top: 1px solid var(--rule); }
     dt { color: var(--muted); font: 700 .68rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -214,15 +345,21 @@ export function renderHtml(report: AuditReport): string {
     .plan li strong, .plan li span { display: block; }
     .plan li span { margin-top: .35rem; color: var(--muted); }
     .limitations { color: var(--muted); }
+    .scope, .baseline { color: var(--muted); }
+    .scope code { color: var(--ink); }
+    .changes { display: grid; gap: .5rem; padding: 0; list-style: none; }
+    .changes li { display: grid; grid-template-columns: 7rem 1fr auto; gap: 1rem; padding: .8rem 0; border-bottom: 1px solid var(--rule); }
+    .changes strong { text-transform: uppercase; }
     footer { margin-top: 5rem; padding-top: 1rem; border-top: 2px solid var(--ink); color: var(--muted); font-size: .78rem; }
     @media (max-width: 42rem) {
       main { width: min(100% - 1.25rem, 76rem); padding-top: 1rem; }
       .hero { grid-template-columns: 1fr; }
-      .score { width: 8rem; justify-self: start; }
+      .status-card { width: 100%; justify-self: start; }
       .counts { grid-template-columns: repeat(2, 1fr); }
       .finding header { grid-template-columns: 1fr auto; }
       .severity { grid-column: 1 / -1; }
       .evidence { grid-template-columns: 1fr; }
+      .changes li { grid-template-columns: 1fr; gap: .25rem; }
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -254,18 +391,29 @@ export function renderHtml(report: AuditReport): string {
         <h1>${repositoryName}</h1>
         <p class="target">${target}</p>
       </div>
-      <div class="score" aria-label="Score ${report.score} out of 100, grade ${report.grade}">
-        <strong>${report.score}</strong>
-        <span>Grade ${report.grade}</span>
+      <div class="status-card">
+        <p class="eyebrow">Policy · ${escapeHtml(report.policy.failOn)}${report.policy.strict ? " · strict" : ""}</p>
+        <strong>${status}</strong>
+        <span>Score ${report.score}/100 · Grade ${report.grade} · secondary heuristic</span>
       </div>
     </header>
 
-    <div class="counts" aria-label="Finding counts">
-      <div><strong>${report.counts.critical}</strong>Critical</div>
-      <div><strong>${report.counts.warning}</strong>Warning</div>
+    <div class="counts" aria-label="${report.comparison.baseline ? "New finding" : "Current finding"} counts">
+      <div><strong>${headlineCounts.critical}</strong>${report.comparison.baseline ? "New critical" : "Critical"}</div>
+      <div><strong>${headlineCounts.warning}</strong>${report.comparison.baseline ? "New warning" : "Warning"}</div>
+      <div><strong>${headlineCounts.unknown}</strong>${report.comparison.baseline ? "New unknown" : "Unknown"}</div>
       <div><strong>${report.counts.pass}</strong>Pass</div>
       <div><strong>${report.counts.info}</strong>Info</div>
     </div>
+
+    <section class="scope" aria-labelledby="scope-title">
+      <h2 id="scope-title">Detection scope</h2>
+      <p><strong>${report.coverage.includedFiles}</strong> of ${report.coverage.trackedFiles} discovered files included; ${report.coverage.excludedFiles} excluded.</p>
+      <p>npm metadata ${report.coverage.dependencyPackages.checked}/${report.coverage.dependencyPackages.eligible} (${escapeHtml(report.coverage.dependencyPackages.status)}) · GitHub metadata ${escapeHtml(report.coverage.github.status)}</p>
+      ${report.coverage.excludes.length > 0 ? `<p>Exclude globs: <code>${escapeHtml(report.coverage.excludes.join(", "))}</code></p>` : ""}
+    </section>
+
+    ${comparisonMarkup}
 
     <section aria-labelledby="checks-title">
       <h2 id="checks-title">Repository checks</h2>

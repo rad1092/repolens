@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { TOOL_NAME, TOOL_VERSION } from "./constants.js";
 import { prepareRepository, scanRepository } from "./scanner.js";
 import type {
@@ -5,6 +7,7 @@ import type {
   AuditReport,
   Evidence,
   Finding,
+  FindingComparisonEvidence,
   Inventory,
   RepositoryIdentity,
   Severity,
@@ -16,6 +19,21 @@ function evidence(
   return entries.map(([label, value]) => ({ label, value }));
 }
 
+function comparisonEvidence(
+  keys: string[],
+  count = keys.length,
+  complete = count === keys.length,
+): FindingComparisonEvidence {
+  if (!complete) return { count, digest: null };
+
+  const hash = createHash("sha256");
+  for (const key of [...keys].sort()) {
+    hash.update(`${Buffer.byteLength(key, "utf8")}:`);
+    hash.update(key);
+  }
+  return { count, digest: hash.digest("hex") };
+}
+
 function finding(
   id: Finding["id"],
   title: string,
@@ -24,8 +42,9 @@ function finding(
   action: string | null,
   deduction: number,
   details: Evidence[] = [],
+  comparisonBasis?: FindingComparisonEvidence,
 ): Finding {
-  return {
+  const result: Finding = {
     id,
     title,
     severity,
@@ -34,6 +53,8 @@ function finding(
     deduction,
     evidence: details,
   };
+  if (comparisonBasis) result.comparisonEvidence = comparisonBasis;
+  return result;
 }
 
 function documentationFindings(inventory: Inventory): Finding[] {
@@ -119,16 +140,16 @@ function automationFindings(inventory: Inventory): Finding[] {
     inventory.workflowFiles.length > 0
       ? finding(
           "ci",
-          "Continuous integration",
+          "CI configuration",
           "pass",
-          `${inventory.workflowFiles.length} GitHub Actions workflow file(s) found.`,
+          `${inventory.workflowFiles.length} GitHub Actions workflow file(s) found. File presence does not prove that a run passed.`,
           null,
           0,
           evidence([["files", inventory.workflowFiles.join(", ")]]),
         )
       : finding(
           "ci",
-          "Continuous integration",
+          "CI configuration",
           "warning",
           "No GitHub Actions workflow was found.",
           "Add a pull-request workflow that installs from the lockfile and runs tests, lint, and build.",
@@ -136,9 +157,128 @@ function automationFindings(inventory: Inventory): Finding[] {
         ),
   );
 
+  results.push(
+    inventory.workflowFiles.length === 0
+      ? finding(
+          "action-pinning",
+          "Immutable action references",
+          "info",
+          "No GitHub Actions workflows were available to inspect.",
+          null,
+          0,
+        )
+      : inventory.unpinnedActions.length === 0
+        ? finding(
+            "action-pinning",
+            "Immutable action references",
+            "pass",
+            "External GitHub Actions references are pinned to full commit SHAs.",
+            null,
+            0,
+          )
+        : finding(
+            "action-pinning",
+            "Immutable action references",
+            "warning",
+            `${inventory.unpinnedActions.length} external action reference(s) use a mutable tag or branch.`,
+            "Pin each external action to a verified full commit SHA and keep a version comment beside it.",
+            Math.min(8, inventory.unpinnedActions.length * 2),
+            inventory.unpinnedActions.slice(0, 12).map((item) => ({
+              label: item.path,
+              value: item.reference,
+            })),
+            comparisonEvidence(
+              inventory.unpinnedActions.map((item) => {
+                const separator = item.reference.lastIndexOf("@");
+                const action =
+                  separator > 0
+                    ? item.reference.slice(0, separator)
+                    : item.reference;
+                return `${item.path}\u0000${action.toLowerCase()}`;
+              }),
+            ),
+          ),
+  );
+
   const dependencyProject =
     (inventory.packageJson?.dependencyCount ?? 0) > 0 ||
     inventory.lockfiles.length > 0;
+  results.push(
+    !dependencyProject
+      ? finding(
+          "dependency-updates",
+          "Dependency update automation",
+          "info",
+          "No dependency project was detected.",
+          null,
+          0,
+        )
+      : inventory.dependencyUpdateFiles.length === 0
+        ? finding(
+            "dependency-updates",
+            "Dependency update automation",
+            "warning",
+            "No Dependabot or Renovate configuration was found.",
+            "Configure one dependency update service with a bounded weekly schedule; do not run overlapping bots.",
+            6,
+          )
+        : inventory.dependabotSecurityUpdates === false
+          ? finding(
+              "dependency-updates",
+              "Dependency update automation",
+              "warning",
+              "A dependency update configuration exists, but GitHub reports Dependabot security updates disabled.",
+              "Enable Dependabot alerts and security updates, or document the alternative security update process.",
+              4,
+              evidence([
+                ["files", inventory.dependencyUpdateFiles.join(", ")],
+              ]),
+            )
+          : finding(
+              "dependency-updates",
+              "Dependency update automation",
+              "pass",
+              `Dependency update configuration found: ${inventory.dependencyUpdateFiles.join(", ")}.`,
+              null,
+              0,
+            ),
+  );
+
+  results.push(
+    inventory.branchProtected === true
+      ? finding(
+          "branch-protection",
+          "Default branch protection",
+          "pass",
+          "GitHub reports protection for the default branch.",
+          null,
+          0,
+        )
+      : inventory.branchProtected === false
+        ? finding(
+            "branch-protection",
+            "Default branch protection",
+            "warning",
+            "The default branch is not protected by classic branch protection or an active matching ruleset.",
+            "Add a repository ruleset or branch protection that blocks force pushes and requires the relevant checks.",
+            10,
+          )
+        : finding(
+            "branch-protection",
+            "Default branch protection",
+            inventory.coverage.github.status === "partial"
+              ? "unknown"
+              : "info",
+            inventory.coverage.github.status === "partial"
+              ? "Branch protection could not be verified with the available GitHub permission or API quota."
+              : "Branch protection was not checked for this local or offline audit.",
+            inventory.coverage.github.status === "partial"
+              ? "Run with a token that can read repository rules, or review the setting in GitHub."
+              : null,
+            0,
+          ),
+  );
+
   results.push(
     inventory.lockfiles.length > 0
       ? finding(
@@ -213,7 +353,27 @@ function automationFindings(inventory: Inventory): Finding[] {
 function hygieneFindings(inventory: Inventory): Finding[] {
   const results: Finding[] = [];
 
-  if (!inventory.dependencyCheck.attempted) {
+  if (
+    inventory.dependencyCheck.status === "unavailable" ||
+    (inventory.dependencyCheck.status === "partial" &&
+      inventory.outdatedDependencies.length === 0)
+  ) {
+    results.push(
+      finding(
+        "outdated-dependencies",
+        "Outdated npm dependencies",
+        "unknown",
+        inventory.dependencyCheck.skippedReason ??
+          "npm dependency metadata was incomplete.",
+        "Retry with registry access before treating dependency freshness as clear.",
+        0,
+        evidence([
+          ["eligible", inventory.dependencyCheck.eligible],
+          ["checked", inventory.dependencyCheck.checked],
+        ]),
+      ),
+    );
+  } else if (!inventory.dependencyCheck.attempted) {
     results.push(
       finding(
         "outdated-dependencies",
@@ -249,6 +409,12 @@ function hygieneFindings(inventory: Inventory): Finding[] {
           label: dependency.name,
           value: `${dependency.declared} → ${dependency.latest} (${dependency.scope})`,
         })),
+        comparisonEvidence(
+          inventory.outdatedDependencies.map(
+            (dependency) =>
+              `${dependency.scope}\u0000${dependency.name.toLowerCase()}`,
+          ),
+        ),
       ),
     );
   }
@@ -276,6 +442,13 @@ function hygieneFindings(inventory: Inventory): Finding[] {
             label: `${match.path}:${match.line}`,
             value: `${match.marker} — ${match.text}`,
           })),
+          comparisonEvidence(
+            inventory.todoMatches.map(
+              (match) =>
+                `${match.path}\u0000${match.marker}\u0000${match.text}`,
+            ),
+            inventory.todoTotal,
+          ),
         ),
   );
 
@@ -300,6 +473,9 @@ function hygieneFindings(inventory: Inventory): Finding[] {
             label: file.path,
             value: `${(file.bytes / (1024 * 1024)).toFixed(2)} MiB`,
           })),
+          comparisonEvidence(
+            inventory.largeFiles.map((file) => file.path),
+          ),
         ),
   );
 
@@ -333,6 +509,7 @@ function hygieneFindings(inventory: Inventory): Finding[] {
             label: "path",
             value: path,
           })),
+          comparisonEvidence(inventory.trackedEnvFiles),
         ),
   );
 
@@ -454,25 +631,37 @@ function activityFindings(
       ),
     );
   } else {
+    const releaseUnavailable =
+      inventory.coverage.github.unavailable.includes("latest release");
     results.push(
       finding(
         "latest-release",
         "Latest release",
-        "info",
-        "No published GitHub release was found or metadata was unavailable.",
-        "Publish signed or checksummed releases when consumers need stable downloadable artifacts.",
+        releaseUnavailable ? "unknown" : "info",
+        releaseUnavailable
+          ? "Latest release metadata could not be read."
+          : "No published GitHub release was found.",
+        releaseUnavailable
+          ? "Retry with GitHub API access before deciding that no release exists."
+          : "Publish signed or checksummed releases when consumers need stable downloadable artifacts.",
         0,
       ),
     );
   }
 
+  const issuesUnavailable =
+    inventory.coverage.github.unavailable.includes("open issues");
+  const pullsUnavailable =
+    inventory.coverage.github.unavailable.includes("open pull requests");
   results.push(
     finding(
       "open-issues",
       "Open issues",
-      "info",
+      issuesUnavailable ? "unknown" : "info",
       inventory.openIssues === null
-        ? "Open issue count was unavailable."
+        ? issuesUnavailable
+          ? "Open issue count could not be read."
+          : "Open issue count was not checked."
         : `${inventory.openIssues} open issue(s).`,
       null,
       0,
@@ -481,9 +670,11 @@ function activityFindings(
     finding(
       "open-pull-requests",
       "Open pull requests",
-      "info",
+      pullsUnavailable ? "unknown" : "info",
       inventory.openPullRequests === null
-        ? "Open pull request count was unavailable."
+        ? pullsUnavailable
+          ? "Open pull request count could not be read."
+          : "Open pull request count was not checked."
         : `${inventory.openPullRequests} open pull request(s).`,
       null,
       0,
@@ -492,6 +683,57 @@ function activityFindings(
   );
 
   return results;
+}
+
+function coverageFinding(inventory: Inventory): Finding {
+  const details: Evidence[] = [
+    {
+      label: "files",
+      value: `${inventory.coverage.includedFiles} included / ${inventory.coverage.excludedFiles} excluded / ${inventory.coverage.trackedFiles} discovered`,
+    },
+    {
+      label: "TODO text files",
+      value: inventory.coverage.todoTextFiles,
+    },
+    {
+      label: "npm metadata",
+      value: `${inventory.coverage.dependencyPackages.checked}/${inventory.coverage.dependencyPackages.eligible} (${inventory.coverage.dependencyPackages.status})`,
+    },
+    {
+      label: "GitHub metadata",
+      value: inventory.coverage.github.status,
+    },
+  ];
+  if (inventory.coverage.excludes.length > 0) {
+    details.push({
+      label: "exclude globs",
+      value: inventory.coverage.excludes.join(", "),
+    });
+  }
+  for (const reason of inventory.coverage.unknownReasons.slice(0, 8)) {
+    details.push({ label: "unknown", value: reason });
+  }
+
+  return inventory.coverage.unknownReasons.length > 0
+    ? finding(
+        "scan-coverage",
+        "Detection scope",
+        "unknown",
+        `${inventory.coverage.unknownReasons.length} external metadata area(s) could not be verified. Unknown does not mean pass.`,
+        "Retry with network and the least GitHub permission needed for the missing metadata, or use non-strict mode when the omission is intentional.",
+        0,
+        details,
+        comparisonEvidence(inventory.coverage.unknownReasons),
+      )
+    : finding(
+        "scan-coverage",
+        "Detection scope",
+        "info",
+        `${inventory.coverage.includedFiles} file(s) were included and ${inventory.coverage.excludedFiles} excluded by configuration.`,
+        null,
+        0,
+        details,
+      );
 }
 
 function grade(score: number): AuditReport["grade"] {
@@ -512,6 +754,7 @@ export function createAuditReport(
     ...automationFindings(inventory),
     ...hygieneFindings(inventory),
     ...activityFindings(inventory, identity, options.staleDays),
+    coverageFinding(inventory),
   ];
   const score = Math.max(
     0,
@@ -520,8 +763,9 @@ export function createAuditReport(
   const severityOrder: Record<Severity, number> = {
     critical: 0,
     warning: 1,
-    info: 2,
-    pass: 3,
+    unknown: 2,
+    info: 3,
+    pass: 4,
   };
   const actions = findings
     .filter(
@@ -545,23 +789,39 @@ export function createAuditReport(
     info: findings.filter((item) => item.severity === "info").length,
     warning: findings.filter((item) => item.severity === "warning").length,
     critical: findings.filter((item) => item.severity === "critical").length,
+    unknown: findings.filter((item) => item.severity === "unknown").length,
   };
 
   const { localPath: _localPath, ...repository } = identity;
   void _localPath;
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tool: { name: TOOL_NAME, version: TOOL_VERSION },
     generatedAt: options.now.toISOString(),
     repository,
     score,
     grade: grade(score),
     counts,
+    comparison: {
+      baseline: null,
+      new: { critical: 0, warning: 0, unknown: 0 },
+      resolved: { critical: 0, warning: 0, unknown: 0 },
+      changes: [],
+    },
+    policy: {
+      failOn: "none",
+      strict: false,
+      passed: true,
+      operationalError: false,
+      reasons: [],
+    },
+    coverage: inventory.coverage,
     findings,
     actions,
     limitations: [
       "RepoLens is a maintenance heuristic, not a vulnerability scanner, license opinion, or proof that tests pass.",
+      "A configured workflow file is evidence of automation intent, not evidence that its latest run passed.",
       "TODO/FIXME scanning skips common generated directories, lockfiles, minified files, files over 1 MiB, and tracked .env contents.",
       "Tracked environment risk is reported from filenames only; RepoLens does not print environment-file values.",
       inventory.dependencyCheck.attempted
@@ -571,7 +831,7 @@ export function createAuditReport(
         ? "Remote audits use a temporary shallow clone and remove it after reporting."
         : "Local audits do not modify files, install dependencies, or run repository scripts.",
       identity.github
-        ? "GitHub counts and release metadata are point-in-time API results and may be unavailable when offline or rate-limited."
+        ? "GitHub settings and counts are point-in-time API results; unavailable fields remain unknown rather than passing."
         : "GitHub release, issue, and pull-request metadata require a recognizable GitHub origin.",
     ],
   };

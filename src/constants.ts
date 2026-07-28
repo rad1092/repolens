@@ -1,9 +1,16 @@
 export const TOOL_NAME = "RepoLens" as const;
-export const TOOL_VERSION = "0.1.1";
+export const TOOL_VERSION = "0.2.0";
 
 export const DEFAULT_STALE_DAYS = 180;
 export const DEFAULT_LARGE_FILE_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_TODO_MATCHES = 50;
+export const DEFAULT_CONFIG_FILE = ".repolens.json";
+export const DEFAULT_EXCLUDES = [
+  "**/.repolens/**",
+  "**/fixtures/**",
+  "**/__fixtures__/**",
+  "**/testdata/**",
+] as const;
 
 export const IGNORED_DIRECTORIES = new Set([
   ".git",

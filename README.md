@@ -1,208 +1,290 @@
 # RepoLens
 
-RepoLens is a read-only Node.js and TypeScript CLI that turns a local or GitHub
-repository into three maintenance views:
+RepoLens is a read-only maintenance triage tool for local and GitHub
+repositories. It answers two bounded questions:
 
-- a concise terminal summary;
-- structured JSON for automation;
-- one self-contained HTML report for review or static hosting.
+1. What should a maintainer inspect next?
+2. Which critical, warning, or unknown findings changed since a saved report?
 
-It answers a practical question: **what should a maintainer fix next?** Every
-scored finding includes evidence, a bounded deduction, and a concrete action.
-RepoLens does not claim that a repository is secure or that its tests pass.
+It runs as a Node.js CLI or a GitHub Action. The same report model renders as a
+terminal summary, versioned JSON, standalone HTML, or GitHub-flavored Markdown.
+The score remains available for rough orientation, but policy decisions use
+explicit finding counts and baseline changes.
 
-## Quick start
+## Install
+
+Node.js 20.11 or newer is required.
+
+```sh
+npm install --global \
+  https://github.com/rad1092/repolens/releases/download/v0.2.0/rad1092-repolens-0.2.0.tgz
+repolens --version
+```
+
+From a source checkout:
 
 ```sh
 npm ci
 npm run build
-node dist/src/cli.js .
+npm link
+repolens scan .
 ```
 
-Audit a public GitHub repository without checking it out yourself:
+The unscoped `repolens` name on npm belongs to a different project. This
+package is prepared as `@rad1092/repolens` for a future scoped npm release, but
+v0.2.0 is installed from its versioned GitHub Release tarball.
+
+## The maintenance loop
+
+Create a policy:
 
 ```sh
-node dist/src/cli.js owner/repository
-node dist/src/cli.js https://github.com/owner/repository
+repolens init
 ```
 
-Generate all three reports:
+Inspect the current repository:
 
 ```sh
-node dist/src/cli.js . --format all --output reports
+repolens scan .
+repolens scan owner/repository
 ```
 
-This writes:
+Save a baseline after reviewing the evidence:
+
+```sh
+repolens scan . \
+  --format json \
+  --output .repolens/baselines/accepted.json \
+  --fail-on none
+```
+
+Compare after the next change:
+
+```sh
+repolens compare . \
+  --baseline .repolens/baselines/accepted.json \
+  --fail-on new-warning
+```
+
+Fix an item, run the same command again, and replace the baseline only after
+the remaining findings are intentionally accepted. RepoLens never updates the
+baseline implicitly.
+
+The default detection scope excludes `.repolens/`. A baseline selected from
+another path inside the target is also excluded for that run.
+
+For aggregate findings, RepoLens compares stable evidence identities as well
+as severity. A newly affected file, dependency, action, or TODO therefore
+counts as worsened even when the finding remains a warning or critical.
+Volatile details such as file size, dependency version, and TODO line number
+do not create a regression by themselves. New reports retain a full,
+non-display comparison digest so a 12-item evidence preview cannot create a
+false regression when its order changes. Older baselines remain compatible;
+they use severity and the full total when available, without inferring changes
+from a truncated preview.
+
+## Commands
 
 ```text
-reports/
-├── repolens-report.html
-├── repolens-report.json
-└── repolens-report.txt
+repolens scan [target] [options]
+repolens compare [target] --baseline <report.json> [options]
+repolens init [directory] [--force]
 ```
 
-The default command prints only to the terminal and writes nothing.
+`scan` accepts a local directory, `owner/repository`, or a GitHub URL. Calling
+`repolens [target]` remains a shorthand for `repolens scan [target]`.
+
+Common options:
+
+```text
+--format terminal,json,html,github
+--output <file-or-directory>
+--config <path>
+--fail-on none|critical|warning|new-critical|new-warning
+--strict
+--offline
+--token-env <environment-variable>
+--stale-days <days>
+--large-file-mb <megabytes>
+```
+
+Run `repolens --help` for the canonical list.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Inspection completed and the selected policy passed |
+| `1` | Inspection completed and the selected policy failed |
+| `2` | Configuration or execution failed, or strict mode found unavailable inspection areas |
+
+Without a baseline, `new-critical` and `new-warning` use current findings so a
+missing baseline cannot silently clear a gate.
+
+## Configuration
+
+`repolens init` writes `.repolens.json`:
+
+```json
+{
+  "schema": 1,
+  "excludes": [
+    "**/.repolens/**",
+    "**/fixtures/**",
+    "**/__fixtures__/**",
+    "**/testdata/**"
+  ],
+  "staleDays": 180,
+  "largeFileMB": 1,
+  "policy": {
+    "failOn": "critical",
+    "strict": false
+  }
+}
+```
+
+The JSON Schema is checked in as
+[`/.repolens.schema.json`](.repolens.schema.json). Unknown config fields fail
+with exit `2`, which catches misspelled policy names instead of ignoring them.
+
+Exclude globs apply before every file-based check. Reports always show the
+number of discovered, included, and excluded files plus the active globs. That
+is why this repository can exclude its deliberately tracked credential
+detection fixtures without disguising the reduced scope.
 
 ## What it checks
 
-| Area | Check | Scope |
-| --- | --- | --- |
-| Documentation | Root README and license | Recognized root filenames |
-| Automation | GitHub Actions workflows | `.github/workflows/*.yml` or `.yaml` |
-| Dependencies | Lockfiles | npm, pnpm, Yarn, Bun, Cargo, Go, Ruby, Python, PHP |
-| Node.js | Root package scripts | `test`, `build`, and `lint` |
-| Freshness | Outdated dependencies | Supported root npm semver ranges vs. registry `latest` |
-| Maintenance debt | TODO and FIXME | Tracked text files, with bounded evidence |
-| Repository size | Large files | Tracked files above a configurable threshold |
-| Credential hygiene | Tracked `.env` risk | Filenames only; values are not read into reports |
-| Governance | Security and contribution docs | Root or `.github/` |
-| Activity | Latest commit and release | Local Git plus GitHub API when available |
-| Queue | Open issues and pull requests | GitHub API; token optional |
-| Branching | Default branch | GitHub metadata, origin HEAD, then current branch |
+| Area | Evidence |
+| --- | --- |
+| Documentation | Root README, license, security policy, contribution guide |
+| CI intent | GitHub Actions workflow files |
+| Workflow hygiene | External actions pinned to full commit SHAs |
+| Dependency upkeep | Lockfiles, root npm ranges, Dependabot or Renovate config |
+| Repository rules | Default-branch protection or a matching active ruleset |
+| Package scripts | Root Node.js test, build, and lint script names |
+| Maintenance debt | Bounded TODO/FIXME evidence and large tracked files |
+| Credential hygiene | Tracked `.env`-pattern filenames; values are never reported |
+| Activity | Latest commit, release, open issues, and open pull requests |
 
-Common generated directories, dependency trees, lockfile bodies, minified
-assets, files over 1 MiB, and tracked environment-file contents are excluded
-from TODO/FIXME scanning.
+A workflow file is evidence that automation is configured; the latest run is
+separate evidence. Dependency freshness compares supported root npm semver
+ranges with the registry `latest` tag. Compatibility and vulnerability review
+remain the responsibility of their dedicated tools.
 
-## Score
+## Unknown is a first-class result
 
-The score begins at 100. Missing or risky maintenance controls make bounded
-deductions:
+GitHub permission failures, API rate limits, timeouts, and incomplete npm
+metadata are reported as `unknown`. They are never converted into a pass.
 
-- tracked environment files: up to 20 points;
-- missing README or license: 10 points each;
-- missing CI, lockfile, scripts, or stale dependencies: bounded per check;
-- stale activity, large files, TODO/FIXME, and governance gaps: smaller
-  deductions.
+Use non-strict mode for a best-effort local review. Use `strict: true` when CI
+must fail with exit `2` unless all requested external metadata was available.
+`--offline` is an intentional scope choice and is displayed as such rather
+than treated as an operational failure.
 
-Informational GitHub counts and non-applicable checks do not lower the score.
-Grades are A (90–100), B (80–89), C (70–79), D (60–69), and F (below 60).
-The JSON `findings` array contains the exact deduction for every check, so the
-result is explainable rather than opaque.
+## GitHub Action
 
-## CLI
+The repository contains a bundled Node action. Pin it to a verified full commit
+SHA:
 
-```text
-Usage:
-  repolens [target] [options]
+```yaml
+name: Repository maintenance
 
-Options:
-  -f, --format <value>       terminal, json, html, all, or a comma-separated list
-  -o, --output <path>       file for one format; directory for multiple formats
-      --offline             skip GitHub API and npm registry checks
-      --token-env <name>    environment variable containing a GitHub token
-      --stale-days <days>   stale commit threshold (default: 180)
-      --large-file-mb <mb>  large tracked-file threshold (default: 1)
-      --max-todos <count>   maximum TODO/FIXME evidence rows (default: 50)
-      --no-color            disable ANSI colors
-  -h, --help                show help
-  -v, --version             show version
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 0 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - id: repolens
+        uses: rad1092/repolens@REPLACE_WITH_A_VERIFIED_FULL_COMMIT_SHA
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          target: "."
+          config: ".repolens.json"
+          fail-on: critical
 ```
 
-Run `repolens --help` for the canonical help text.
+The action adds a Markdown job summary and annotations. It exposes current and
+new finding counts plus absolute paths to JSON, HTML, and Markdown reports so
+the caller can upload them with `actions/upload-artifact`.
 
-### Output behavior
-
-- One selected format without `--output` is written to stdout.
-- Multiple formats without `--output` print the terminal report and write
-  `repolens-report.json` and `repolens-report.html` in the current directory.
-- `--output` writes only because the caller explicitly requested a destination.
-- Reports are UTF-8. JSON uses schema version `1`.
+See [`examples/repolens-workflow.yml`](examples/repolens-workflow.yml) for the
+complete artifact step.
 
 ## GitHub authentication
 
-Public repositories and public API metadata work without a token until GitHub's
-anonymous rate limit is reached. For private repositories or higher API limits,
-place a token in an environment variable:
+Public metadata works anonymously until GitHub's API rate limit is reached.
+For private repositories or settings that need authentication, pass a token
+through an environment variable:
 
 ```sh
 export REPOLENS_GITHUB_TOKEN="..."
-node dist/src/cli.js owner/private-repository \
+repolens scan owner/private-repository \
   --token-env REPOLENS_GITHUB_TOKEN
 ```
 
-RepoLens intentionally rejects `--token`. A token is passed to the temporary
-Git process through environment-backed Git configuration and to GitHub over an
-Authorization header. It is not written to the checkout, report, logs, or a
-RepoLens configuration file. RepoLens removes its temporary remote checkout
-after the report model has been created.
+RepoLens rejects `--token`. Remote Git authentication is supplied to the
+temporary Git process through environment-backed configuration. It is not
+written to the checkout, report, log, or config file.
 
-Use the narrowest token permissions that can read the selected repository and
-its metadata. Unset the environment variable when finished.
+Use the narrowest read permission available. Repository rules and some
+security settings can remain unknown when the token cannot read them.
 
-## Read-only boundary
+## Inspection boundary
 
-By default RepoLens:
+During a scan RepoLens limits its activity to:
 
 - reads tracked files or walks a non-Git directory;
-- runs read-only Git queries;
-- performs a shallow temporary clone for a remote target;
+- performs read-only Git queries;
+- uses a temporary shallow clone for a remote target;
 - fetches point-in-time GitHub and npm metadata;
-- never installs audited dependencies;
-- never runs audited build, test, hook, or package scripts;
-- never edits the target repository.
+- leaves audited dependencies, hooks, tests, builds, and package scripts
+  untouched;
+- leaves the target unchanged.
 
-Generating JSON or HTML is an explicit output action. A published report can
-reveal repository names, file paths, commit subjects, and selected TODO/FIXME
-lines. Review it before making it public.
-
-## HTML report and nested hosting
-
-The HTML reporter contains its CSS inline and has no JavaScript, remote fonts,
-analytics, or root-relative assets. The same file works at:
-
-- `https://whago.net/repolens/`
-- `https://rad1092.github.io/repolens/`
-- any other nested static path.
-
-Generate the checked-in example:
-
-```sh
-npm run example
-```
-
-The result is [`examples/index.html`](examples/index.html). The public Pages
-workflow instead audits the real `rad1092/whago-home` repository, then uploads
-the standalone report as `site/index.html`. This keeps the demo honest without
-misclassifying RepoLens's deliberately tracked `.env` detection fixture as a
-production credential incident.
-
-## Continuous integration and Pages
-
-`.github/workflows/ci.yml` runs the clean build, fixture tests, and TypeScript
-lint gate on pushes and pull requests.
-
-`.github/workflows/pages.yml` verifies RepoLens, audits the public
-`rad1092/whago-home` repository, generates a standalone HTML report plus JSON,
-and deploys them with the official GitHub Pages actions. It reads the workflow
-token from an environment variable; the generated files contain no token.
+`init` and an explicit `--output` are the only requested writes. Published
+reports can reveal repository names, file paths, commit subjects, and selected
+TODO/FIXME lines, so review them before publishing.
 
 ## Development
 
 ```sh
-npm run build     # compile src and tests
-npm test          # compile and run fixture tests
-npm run lint      # strict TypeScript check
-npm run check     # clean build, tests, and lint
-npm run example   # regenerate examples/index.html
+npm ci
+npm run check
+npm run example
 ```
 
-Tests cover CLI parsing and help, raw-token rejection, tracked `.env` detection,
-TODO/FIXME evidence, large files, scoring and action priority, JSON/HTML output,
-non-Git directories, explicit output writes, and report redaction.
+`npm run check` compiles, runs the test suite, checks TypeScript, and rebuilds
+the committed GitHub Action bundle. CI additionally rejects a stale bundle.
+Tests cover raw-token rejection, symlink
+boundaries, explicit config exclusions, baseline comparison, policy exit codes,
+strict unknown handling, report escaping, and the controls that previously
+allowed an unprotected repository to appear perfect.
 
-## Known limits
+## Current scope
 
-- Dependency freshness currently covers supported semver ranges in the root
-  npm `package.json`; it is not a compatibility resolver.
-- RepoLens does not run tests, inspect runtime behavior, scan vulnerabilities,
-  validate license compatibility, or detect every secret.
-- GitHub metadata is best effort and can be unavailable offline or when rate
-  limited.
-- Remote audits use a shallow history, so long-term activity analysis is
-  intentionally out of scope.
-- Filename and text heuristics can produce false positives. Use the evidence and
-  action as a review queue, not as an automatic merge gate.
+- Vulnerability, secret-value, license, and test-result evidence comes from
+  dedicated scanners and CI systems.
+- Repository changes, issue creation, dependency merges, and account dashboards
+  remain maintainer-controlled actions.
+- Root Node.js dependency ranges receive version comparison. Other ecosystems
+  receive lockfile and repository-level checks.
+- Remote scans use shallow history.
+- Text and filename heuristics can produce false positives. Keep reviewed
+  exclusions explicit so every report shows its detection scope.
+- Output formats focus on terminal, JSON, HTML, and GitHub Markdown because most
+  findings describe repository-level maintenance decisions.
 
 ## License
 

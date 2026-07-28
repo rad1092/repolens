@@ -1,4 +1,4 @@
-name: Publish RepoLens report
+name: Publish RepoLens documentation
 
 on:
   push:
@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -22,6 +20,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 100
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -32,28 +31,17 @@ jobs:
       - name: Install and verify
         run: |
           npm ci
-          npm run check
+          npm run ci
 
-      - name: Check out the public audit target
-        run: git clone --depth 100 https://github.com/rad1092/whago-home.git target/whago-home
-
-      - name: Generate base-path-independent reports
-        env:
-          REPOLENS_GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p site
-          node dist/src/cli.js target/whago-home --format html --output site/index.html --token-env REPOLENS_GITHUB_TOKEN
-          node dist/src/cli.js target/whago-home --format json --output site/report.json --token-env REPOLENS_GITHUB_TOKEN
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-
-      - name: Upload Pages artifact
+      - name: Upload product documentation
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
-          path: site
+          path: docs
 
   deploy:
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
