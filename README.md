@@ -161,20 +161,21 @@ Generate the checked-in example:
 npm run example
 ```
 
-The result is [`examples/index.html`](examples/index.html). The Pages workflow
-uses the same command and uploads `site/index.html`, so the project repository
-can publish directly at the GitHub Pages project URL. The file can also be
-copied unchanged to the `/repolens/` directory of `whago.net`.
+The result is [`examples/index.html`](examples/index.html). The public Pages
+workflow instead audits the real `rad1092/whago-home` repository, then uploads
+the standalone report as `site/index.html`. This keeps the demo honest without
+misclassifying RepoLens's deliberately tracked `.env` detection fixture as a
+production credential incident.
 
 ## Continuous integration and Pages
 
 `.github/workflows/ci.yml` runs the clean build, fixture tests, and TypeScript
 lint gate on pushes and pull requests.
 
-`.github/workflows/pages.yml` verifies RepoLens, audits the repository itself,
-generates a standalone HTML report plus JSON, and deploys them with the official
-GitHub Pages actions. It reads the workflow token from an environment variable;
-the generated files contain no token.
+`.github/workflows/pages.yml` verifies RepoLens, audits the public
+`rad1092/whago-home` repository, generates a standalone HTML report plus JSON,
+and deploys them with the official GitHub Pages actions. It reads the workflow
+token from an environment variable; the generated files contain no token.
 
 ## Development
 

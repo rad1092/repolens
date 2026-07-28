@@ -34,13 +34,16 @@ jobs:
           npm ci
           npm run check
 
+      - name: Check out the public audit target
+        run: git clone --depth 100 https://github.com/rad1092/whago-home.git target/whago-home
+
       - name: Generate base-path-independent reports
         env:
           REPOLENS_GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p site
-          node dist/src/cli.js . --format html --output site/index.html --token-env REPOLENS_GITHUB_TOKEN
-          node dist/src/cli.js . --format json --output site/report.json --token-env REPOLENS_GITHUB_TOKEN
+          node dist/src/cli.js target/whago-home --format html --output site/index.html --token-env REPOLENS_GITHUB_TOKEN
+          node dist/src/cli.js target/whago-home --format json --output site/report.json --token-env REPOLENS_GITHUB_TOKEN
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

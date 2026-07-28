@@ -541,7 +541,7 @@ async function fetchJson<T>(
     : timeout;
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
-    "User-Agent": "RepoLens/0.1.0",
+    "User-Agent": "RepoLens/0.1.1",
     "X-GitHub-Api-Version": "2022-11-28",
   };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -704,7 +704,7 @@ async function outdatedDependencies(
           const response = await fetch(
             `https://registry.npmjs.org/${encodeURIComponent(dependency.name)}/latest`,
             {
-              headers: { "User-Agent": "RepoLens/0.1.0" },
+              headers: { "User-Agent": "RepoLens/0.1.1" },
               signal: options.signal
                 ? AbortSignal.any([options.signal, timeout])
                 : timeout,

@@ -1,5 +1,5 @@
 export const TOOL_NAME = "RepoLens" as const;
-export const TOOL_VERSION = "0.1.0";
+export const TOOL_VERSION = "0.1.1";
 
 export const DEFAULT_STALE_DAYS = 180;
 export const DEFAULT_LARGE_FILE_BYTES = 1024 * 1024;

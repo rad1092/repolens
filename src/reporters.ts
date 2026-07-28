@@ -289,5 +289,5 @@ export function renderHtml(report: AuditReport): string {
   </main>
 </body>
 </html>
-`;
+`.replace(/[ \t]+$/gm, "");
 }

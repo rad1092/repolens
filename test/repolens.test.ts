@@ -201,6 +201,7 @@ test("renders standalone HTML and stable JSON without executable content", async
     assert.doesNotMatch(html, /<script\b/i);
     assert.doesNotMatch(html, /(?:href|src)="\//i);
     assert.doesNotMatch(html, /https?:\/\/[^"]+\.(?:js|css)/i);
+    assert.doesNotMatch(html, /[ \t]+$/m);
     assert.equal(json.schemaVersion, 1);
   } finally {
     await fixture.cleanup();

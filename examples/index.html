@@ -98,9 +98,9 @@
   <main>
     <header class="hero">
       <div>
-        <p class="eyebrow">RepoLens 0.1.0 · repository maintenance audit</p>
+        <p class="eyebrow">RepoLens 0.1.1 · repository maintenance audit</p>
         <h1>example</h1>
-        <p class="target"><code>test/fixtures/example</code></p>
+        <p class="target"><a href="https://github.com/rad1092/repolens">https://github.com/rad1092/repolens</a></p>
       </div>
       <div class="score" aria-label="Score 100 out of 100, grade A">
         <strong>100</strong>
@@ -111,8 +111,8 @@
     <div class="counts" aria-label="Finding counts">
       <div><strong>0</strong>Critical</div>
       <div><strong>0</strong>Warning</div>
-      <div><strong>9</strong>Pass</div>
-      <div><strong>7</strong>Info</div>
+      <div><strong>12</strong>Pass</div>
+      <div><strong>4</strong>Info</div>
     </div>
 
     <section aria-labelledby="checks-title">
@@ -121,161 +121,161 @@
     <header>
       <span class="severity">PASS</span>
       <h3>README</h3>
-      
+
     </header>
     <p>A root README is present.</p>
     <dl class="evidence"><div><dt>files</dt><dd>README.md</dd></div></dl>
-    
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>License</h3>
-      
+
     </header>
     <p>A root license file is present.</p>
     <dl class="evidence"><div><dt>files</dt><dd>LICENSE</dd></div></dl>
-    
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>Security policy</h3>
-      
+
     </header>
     <p>A security policy is present.</p>
     <dl class="evidence"><div><dt>files</dt><dd>SECURITY.md</dd></div></dl>
-    
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>Contributing guide</h3>
-      
+
     </header>
     <p>A contribution guide is present.</p>
     <dl class="evidence"><div><dt>files</dt><dd>CONTRIBUTING.md</dd></div></dl>
-    
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>Continuous integration</h3>
-      
+
     </header>
     <p>1 GitHub Actions workflow file(s) found.</p>
     <dl class="evidence"><div><dt>files</dt><dd>.github/workflows/ci.yml</dd></div></dl>
-    
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>Dependency lockfile</h3>
-      
+
     </header>
     <p>1 dependency lockfile(s) found.</p>
     <dl class="evidence"><div><dt>files</dt><dd>package-lock.json</dd></div></dl>
-    
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>Package scripts</h3>
-      
+
     </header>
     <p>Root test, build, and lint scripts are present.</p>
     <dl class="evidence"><div><dt>scripts</dt><dd>build, lint, test</dd></div></dl>
-    
+
   </article><article class="finding finding-info">
     <header>
       <span class="severity">INFO</span>
       <h3>Outdated npm dependencies</h3>
-      
+
     </header>
     <p>No npm dependencies were found.</p>
-    
-    
+
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>TODO and FIXME markers</h3>
-      
+
     </header>
     <p>No TODO or FIXME markers were found in scanned text files.</p>
-    
-    
+
+
   </article><article class="finding finding-pass">
     <header>
       <span class="severity">PASS</span>
       <h3>Large tracked files</h3>
-      
+
     </header>
     <p>No tracked file exceeded the configured size threshold.</p>
-    
-    
-  </article><article class="finding finding-info">
+
+
+  </article><article class="finding finding-pass">
     <header>
-      <span class="severity">INFO</span>
+      <span class="severity">PASS</span>
       <h3>Tracked environment files</h3>
-      
+
     </header>
-    <p>The target is not a Git work tree, so tracked .env risk is not applicable.</p>
-    
-    <p class="action"><strong>Action</strong> Review environment files before initializing version control and commit only value-free examples.</p>
-  </article><article class="finding finding-info">
+    <p>No tracked .env file pattern was found.</p>
+
+
+  </article><article class="finding finding-pass">
     <header>
-      <span class="severity">INFO</span>
+      <span class="severity">PASS</span>
       <h3>Recent commit</h3>
-      
+
     </header>
-    <p>The target is not a Git work tree, so commit activity is unavailable.</p>
-    
-    <p class="action"><strong>Action</strong> Initialize version control when this directory becomes a maintained repository.</p>
-  </article><article class="finding finding-info">
+    <p>The latest commit is 0 day(s) old.</p>
+    <dl class="evidence"><div><dt>commit</dt><dd>3585c7aa78d7</dd></div><div><dt>date</dt><dd>2026-07-28T21:12:32+09:00</dd></div><div><dt>subject</dt><dd>Release RepoLens 0.1.0</dd></div></dl>
+
+  </article><article class="finding finding-pass">
     <header>
-      <span class="severity">INFO</span>
+      <span class="severity">PASS</span>
       <h3>Default branch</h3>
-      
+
     </header>
-    <p>The target is not a Git work tree, so no default branch exists.</p>
-    
-    
+    <p>Default branch: main.</p>
+    <dl class="evidence"><div><dt>branch</dt><dd>main</dd></div></dl>
+
   </article><article class="finding finding-info">
     <header>
       <span class="severity">INFO</span>
       <h3>Latest release</h3>
-      
+
     </header>
-    <p>No GitHub origin was detected, so release metadata was unavailable.</p>
-    
-    
+    <p>No published GitHub release was found or metadata was unavailable.</p>
+
+    <p class="action"><strong>Action</strong> Publish signed or checksummed releases when consumers need stable downloadable artifacts.</p>
   </article><article class="finding finding-info">
     <header>
       <span class="severity">INFO</span>
       <h3>Open issues</h3>
-      
+
     </header>
     <p>Open issue count was unavailable.</p>
     <dl class="evidence"><div><dt>count</dt><dd>Unavailable</dd></div></dl>
-    
+
   </article><article class="finding finding-info">
     <header>
       <span class="severity">INFO</span>
       <h3>Open pull requests</h3>
-      
+
     </header>
     <p>Open pull request count was unavailable.</p>
     <dl class="evidence"><div><dt>count</dt><dd>Unavailable</dd></div></dl>
-    
+
   </article></div>
     </section>
 
     <section class="plan" aria-labelledby="plan-title">
       <h2 id="plan-title">Improvement plan</h2>
-      <ol><li><strong>Initialize version control when this directory becomes a maintained repository.</strong><span>The target is not a Git work tree, so commit activity is unavailable.</span></li><li><strong>Review environment files before initializing version control and commit only value-free examples.</strong><span>The target is not a Git work tree, so tracked .env risk is not applicable.</span></li></ol>
+      <ol><li><strong>Publish signed or checksummed releases when consumers need stable downloadable artifacts.</strong><span>No published GitHub release was found or metadata was unavailable.</span></li></ol>
     </section>
 
     <section class="limitations" aria-labelledby="limits-title">
       <h2 id="limits-title">What this report does not prove</h2>
-      <ul><li>RepoLens is a maintenance heuristic, not a vulnerability scanner, license opinion, or proof that tests pass.</li><li>TODO/FIXME scanning skips common generated directories, lockfiles, minified files, files over 1 MiB, and tracked .env contents.</li><li>Tracked environment risk is reported from filenames only; RepoLens does not print environment-file values.</li><li>Outdated npm dependency check skipped: No npm dependencies were found.</li><li>Local audits do not modify files, install dependencies, or run repository scripts.</li><li>GitHub release, issue, and pull-request metadata require a recognizable GitHub origin.</li></ul>
+      <ul><li>RepoLens is a maintenance heuristic, not a vulnerability scanner, license opinion, or proof that tests pass.</li><li>TODO/FIXME scanning skips common generated directories, lockfiles, minified files, files over 1 MiB, and tracked .env contents.</li><li>Tracked environment risk is reported from filenames only; RepoLens does not print environment-file values.</li><li>Outdated npm dependency check skipped: No npm dependencies were found.</li><li>Local audits do not modify files, install dependencies, or run repository scripts.</li><li>GitHub counts and release metadata are point-in-time API results and may be unavailable when offline or rate-limited.</li></ul>
     </section>
 
     <footer>
-      Generated 2026-07-28T12:12:00.213Z by RepoLens 0.1.0.
+      Generated 2026-07-28T12:45:00.777Z by RepoLens 0.1.1.
       This static report contains no scripts, remote fonts, analytics, or stored token.
     </footer>
   </main>
