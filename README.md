@@ -1,7 +1,7 @@
 # RepoLens
 
-RepoLens is a read-only maintenance triage tool for local and GitHub
-repositories. It answers two bounded questions:
+RepoLens is a read-only maintenance triage CLI and GitHub Action for local and
+GitHub repositories. It answers two bounded questions:
 
 1. What should a maintainer inspect next?
 2. Which critical, warning, or unknown findings changed since a saved report?
@@ -10,6 +10,8 @@ It runs as a Node.js CLI or a GitHub Action. The same report model renders as a
 terminal summary, versioned JSON, standalone HTML, or GitHub-flavored Markdown.
 The score remains available for rough orientation, but policy decisions use
 explicit finding counts and baseline changes.
+
+Product guide: [https://repolens.whago.net/](https://repolens.whago.net/)
 
 ## Install
 
@@ -56,6 +58,9 @@ repolens scan . \
   --format json \
   --output .repolens/baselines/accepted.json \
   --fail-on none
+
+git add .repolens.json .repolens/baselines/accepted.json
+git commit -m "chore: accept RepoLens maintenance baseline"
 ```
 
 Compare after the next change:
@@ -66,9 +71,9 @@ repolens compare . \
   --fail-on new-warning
 ```
 
-Fix an item, run the same command again, and replace the baseline only after
-the remaining findings are intentionally accepted. RepoLens never updates the
-baseline implicitly.
+Fix an item and run the comparison again. Replace the committed baseline only
+after the remaining findings are intentionally accepted. RepoLens never updates
+the baseline implicitly.
 
 The default detection scope excludes `.repolens/`. A baseline selected from
 another path inside the target is also excluded for that run.
@@ -183,8 +188,10 @@ than treated as an operational failure.
 
 ## GitHub Action
 
-The repository contains a bundled Node action. Pin it to a verified full commit
-SHA:
+Create and review `.repolens/baselines/accepted.json` with the command above,
+then copy this workflow. RepoLens v0.2.0 is pinned to its verified full commit
+SHA, and the policy fails only when a warning or critical finding is new or
+worse than that accepted report.
 
 ```yaml
 name: Repository maintenance
@@ -195,6 +202,7 @@ on:
     branches: [main]
   schedule:
     - cron: "17 0 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -204,23 +212,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - id: repolens
-        uses: rad1092/repolens@REPLACE_WITH_A_VERIFIED_FULL_COMMIT_SHA
+        uses: rad1092/repolens@00c84775267424a640abbee86fd2b1a1e5f6c159 # v0.2.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           target: "."
           config: ".repolens.json"
-          fail-on: critical
+          baseline: ".repolens/baselines/accepted.json"
+          fail-on: new-warning
+
+      - if: always() && steps.repolens.outputs.report-json != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: repolens-report
+          path: |
+            ${{ steps.repolens.outputs.report-json }}
+            ${{ steps.repolens.outputs.report-html }}
+            ${{ steps.repolens.outputs.report-markdown }}
 ```
 
 The action adds a Markdown job summary and annotations. It exposes current and
 new finding counts plus absolute paths to JSON, HTML, and Markdown reports so
 the caller can upload them with `actions/upload-artifact`.
 
-See [`examples/repolens-workflow.yml`](examples/repolens-workflow.yml) for the
-complete artifact step.
+The same copyable workflow is checked in at
+[`examples/repolens-workflow.yml`](examples/repolens-workflow.yml).
 
 ## GitHub authentication
 

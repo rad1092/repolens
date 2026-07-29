@@ -1,7 +1,7 @@
 {
   "name": "@rad1092/repolens",
   "version": "0.2.0",
-  "description": "Read-only repository health audits for local and GitHub repositories.",
+  "description": "Read-only repository maintenance triage as a CLI and GitHub Action.",
   "type": "module",
   "bin": {
     "repolens": "./dist/src/cli.js"
@@ -40,7 +40,7 @@
     "github"
   ],
   "license": "MIT",
-  "homepage": "https://github.com/rad1092/repolens#readme",
+  "homepage": "https://repolens.whago.net/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rad1092/repolens.git"

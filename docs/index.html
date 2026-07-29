@@ -3,53 +3,232 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="RepoLens turns repository evidence into a prioritized maintenance queue for local work and GitHub Actions.">
-  <title>RepoLens — repository maintenance triage</title>
+  <meta name="description" content="RepoLens is a read-only repository maintenance CLI and GitHub Action that shows evidence, compares an accepted baseline, and blocks new regressions in CI.">
+  <link rel="canonical" href="https://repolens.whago.net/">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://repolens.whago.net/">
+  <meta property="og:title" content="RepoLens — repository maintenance CLI and GitHub Action">
+  <meta property="og:description" content="Review repository evidence once, accept a baseline, and block new maintenance regressions on every change.">
+  <meta property="og:image" content="https://repolens.whago.net/og.png">
+  <meta property="og:image:width" content="1731">
+  <meta property="og:image:height" content="909">
+  <meta property="og:image:alt" content="RepoLens CLI and GitHub Action maintenance result">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://repolens.whago.net/og.png">
+  <title>RepoLens — repository maintenance CLI and GitHub Action</title>
   <style>
     :root {
-      color-scheme: light;
-      --paper: #f1f0e8;
-      --surface: #fffef8;
-      --ink: #131411;
-      --muted: #63665e;
-      --line: #b8bbb2;
-      --blue: #3154ff;
-      --acid: #ccff45;
+      color-scheme: dark;
+      --canvas: #081019;
+      --surface: #101c28;
+      --surface-strong: #172838;
+      --ink: #f2f7fb;
+      --muted: #9bb0c1;
+      --line: #294156;
+      --cyan: #64dcff;
+      --green: #7cf5ad;
+      --amber: #ffc868;
+      --red: #ff7b7b;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
+
     * { box-sizing: border-box; }
-    html { background: var(--paper); }
-    body { margin: 0; color: var(--ink); background: var(--paper); line-height: 1.55; }
+    html { background: var(--canvas); scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: var(--canvas); line-height: 1.55; }
     a { color: inherit; text-underline-offset: .22em; }
-    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-    header, main, footer { width: min(100% - 2rem, 74rem); margin-inline: auto; }
-    nav { display: flex; min-height: 5rem; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ink); }
-    nav strong { letter-spacing: -.04em; }
-    nav div { display: flex; gap: 1.25rem; font-size: .82rem; font-weight: 700; }
-    .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(18rem, .6fr); gap: 4rem; padding: clamp(4rem, 10vw, 8rem) 0; }
-    .eyebrow { margin: 0 0 2rem; font: 800 .72rem/1.2 ui-monospace, monospace; letter-spacing: .08em; }
-    h1 { max-width: 9ch; margin: 0; font-size: clamp(4rem, 10vw, 8.5rem); letter-spacing: -.075em; line-height: .86; }
-    .lede { max-width: 37rem; margin: 2rem 0 0; font-size: clamp(1.05rem, 2vw, 1.35rem); }
-    .loop { align-self: end; padding: 1.5rem; border: 1px solid var(--ink); background: var(--surface); }
-    .loop ol { display: grid; gap: .65rem; margin: 1.25rem 0 0; padding: 0; list-style: none; counter-reset: step; }
-    .loop li { display: grid; grid-template-columns: 2rem 1fr; gap: .75rem; padding-top: .65rem; border-top: 1px solid var(--line); counter-increment: step; }
-    .loop li::before { content: "0" counter(step); color: var(--blue); font: 800 .72rem/1.8 ui-monospace, monospace; }
-    section { padding: 4rem 0; border-top: 1px solid var(--ink); }
-    h2 { max-width: 15ch; margin: 0 0 2rem; font-size: clamp(2rem, 5vw, 4rem); letter-spacing: -.055em; line-height: .95; }
-    .commands { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--ink); border: 1px solid var(--ink); }
-    .commands article { min-width: 0; padding: 1.4rem; background: var(--surface); }
-    .commands span { color: var(--blue); font: 800 .72rem/1.2 ui-monospace, monospace; }
-    .commands h3 { margin: 1.5rem 0 .5rem; font-size: 1.2rem; }
-    pre { overflow-x: auto; margin: 1.25rem 0 0; padding: 1.2rem; background: var(--ink); color: var(--acid); font-size: .82rem; line-height: 1.7; }
-    .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
-    .facts ul { margin: 0; padding-left: 1.2rem; }
-    .facts li + li { margin-top: .7rem; }
-    .boundary { padding: 1.5rem; border: 1px solid var(--line); background: var(--surface); }
-    footer { display: flex; justify-content: space-between; gap: 2rem; padding: 2rem 0 4rem; border-top: 1px solid var(--ink); color: var(--muted); font-size: .78rem; }
-    @media (max-width: 48rem) {
-      .hero, .facts { grid-template-columns: 1fr; }
-      .commands { grid-template-columns: 1fr; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    header, main, footer { width: min(100% - 2rem, 72rem); margin-inline: auto; }
+
+    nav {
+      display: flex;
+      min-height: 4.75rem;
+      align-items: center;
+      justify-content: space-between;
+      gap: 2rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: .7rem;
+      text-decoration: none;
+      font-weight: 800;
+      letter-spacing: -.035em;
+    }
+
+    .brand::before {
+      width: .75rem;
+      height: .75rem;
+      border: 2px solid var(--cyan);
+      border-radius: 50%;
+      box-shadow: 0 0 0 .22rem rgb(100 220 255 / 12%);
+      content: "";
+    }
+
+    nav div { display: flex; align-items: center; gap: 1.25rem; font-size: .82rem; font-weight: 700; }
+    nav div a:last-child { color: var(--cyan); }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(22rem, .95fr);
+      gap: clamp(2.5rem, 7vw, 6rem);
+      align-items: center;
+      min-height: min(48rem, calc(100vh - 4.75rem));
+      padding: clamp(4rem, 10vw, 8rem) 0;
+    }
+
+    .kicker {
+      margin: 0 0 1.35rem;
+      color: var(--cyan);
+      font: 800 .72rem/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 12ch;
+      margin: 0;
+      font-size: clamp(3.2rem, 8vw, 7.2rem);
+      letter-spacing: -.072em;
+      line-height: .91;
+    }
+
+    .lede {
+      max-width: 39rem;
+      margin: 1.8rem 0 0;
+      color: #c9d7e2;
+      font-size: clamp(1.05rem, 2vw, 1.3rem);
+    }
+
+    .hero-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 2rem; }
+    .hero-actions a {
+      display: inline-flex;
+      min-height: 2.9rem;
+      align-items: center;
+      justify-content: center;
+      padding: .65rem 1rem;
+      border: 1px solid var(--line);
+      border-radius: .4rem;
+      text-decoration: none;
+      font-size: .86rem;
+      font-weight: 800;
+    }
+    .hero-actions a:first-child { border-color: var(--cyan); background: var(--cyan); color: #061019; }
+
+    .result {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: .7rem;
+      background: #050b11;
+      box-shadow: 0 1.8rem 5rem rgb(0 0 0 / 30%);
+    }
+
+    .result header {
+      display: flex;
+      width: auto;
+      align-items: center;
+      justify-content: space-between;
+      margin: 0;
+      padding: .85rem 1rem;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font: 700 .7rem/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .result header span:last-child { color: var(--green); }
+    .result pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 1.35rem;
+      color: #d9e7f2;
+      font-size: clamp(.74rem, 1.7vw, .86rem);
+      line-height: 1.75;
+    }
+    .prompt { color: var(--cyan); }
+    .passed { color: var(--green); }
+    .warning { color: var(--amber); }
+    .dim { color: #70889a; }
+
+    section { padding: clamp(4rem, 8vw, 7rem) 0; border-top: 1px solid var(--line); }
+    .section-heading {
+      display: grid;
+      grid-template-columns: minmax(0, .65fr) minmax(20rem, 1fr);
+      gap: 3rem;
+      margin-bottom: 2.5rem;
+    }
+    h2 { max-width: 12ch; margin: 0; font-size: clamp(2.35rem, 5vw, 4.8rem); letter-spacing: -.058em; line-height: .97; }
+    .section-heading p:last-child { max-width: 42rem; margin: 0; color: var(--muted); font-size: 1.05rem; }
+
+    .workflow-grid {
+      display: grid;
+      grid-template-columns: minmax(0, .75fr) minmax(0, 1.25fr);
+      gap: 1rem;
+    }
+    .panel { min-width: 0; padding: 1.4rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface); }
+    .panel-label { margin: 0; color: var(--cyan); font: 800 .7rem/1.2 "SFMono-Regular", Consolas, monospace; letter-spacing: .08em; text-transform: uppercase; }
+    .panel h3 { margin: 1rem 0 .55rem; font-size: 1.25rem; }
+    .panel > p:not(.panel-label) { margin: 0; color: var(--muted); }
+    pre.code {
+      overflow-x: auto;
+      margin: 1.25rem -1.4rem -1.4rem;
+      padding: 1.25rem 1.4rem;
+      border-top: 1px solid var(--line);
+      border-radius: 0 0 .55rem .55rem;
+      background: #050b11;
+      color: #d9e7f2;
+      font-size: .76rem;
+      line-height: 1.65;
+    }
+
+    .reports {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: .55rem;
+      background: var(--line);
+    }
+    .reports article { padding: 1.35rem; background: var(--surface); }
+    .reports strong { display: block; margin-bottom: .45rem; font-size: 1.05rem; }
+    .reports p { margin: 0; color: var(--muted); font-size: .88rem; }
+
+    .boundary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+    .boundary div { padding: 1.2rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--surface); }
+    .boundary strong { color: var(--green); }
+    .boundary p { margin: .55rem 0 0; color: var(--muted); font-size: .9rem; }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 2rem;
+      padding: 2rem 0 4rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .8rem;
+    }
+    footer div { display: flex; flex-wrap: wrap; gap: 1rem; }
+
+    @media (max-width: 52rem) {
+      .hero, .section-heading, .workflow-grid { grid-template-columns: 1fr; }
+      .hero { min-height: 0; }
+      .result { max-width: 42rem; }
+      .reports { grid-template-columns: repeat(2, 1fr); }
+      .boundary { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 34rem) {
       nav div a:first-child { display: none; }
+      h1 { font-size: clamp(3rem, 18vw, 4.7rem); }
+      .reports { grid-template-columns: 1fr; }
       footer { flex-direction: column; }
     }
   </style>
@@ -57,91 +236,145 @@
 <body>
   <header>
     <nav aria-label="Primary">
-      <strong>RepoLens</strong>
+      <a class="brand" href="https://repolens.whago.net/">RepoLens</a>
       <div>
-        <a href="#commands">Commands</a>
-        <a href="https://github.com/rad1092/repolens">GitHub ↗</a>
+        <a href="#workflow">Maintenance loop</a>
+        <a href="https://github.com/rad1092/repolens">Source ↗</a>
       </div>
     </nav>
+
     <div class="hero">
       <div>
-        <p class="eyebrow">READ-ONLY REPOSITORY TRIAGE</p>
-        <h1>Fix the next repo problem.</h1>
-        <p class="lede">RepoLens scans a local path or GitHub repository, shows what it could verify, and turns new maintenance regressions into a terminal or CI policy result.</p>
+        <p class="kicker">CLI + GitHub Action</p>
+        <h1>See what changed. Stop new repo debt.</h1>
+        <p class="lede">RepoLens turns tracked files and repository metadata into evidence a maintainer can review locally, accept as a baseline, and enforce on every pull request.</p>
+        <div class="hero-actions">
+          <a href="#workflow">Set up the maintenance loop</a>
+          <a href="https://github.com/rad1092/repolens/releases/tag/v0.2.0">Install v0.2.0 ↗</a>
+        </div>
       </div>
-      <aside class="loop">
-        <strong>Maintenance loop</strong>
-        <ol>
-          <li>Configure and scan a repository</li>
-          <li>Review evidence and scope</li>
-          <li>Save the accepted baseline</li>
-          <li>Fix an item and compare again</li>
-        </ol>
+
+      <aside class="result" aria-label="Example RepoLens terminal result">
+        <header>
+          <span>repolens compare</span>
+          <span>policy passed</span>
+        </header>
+        <pre><span class="prompt">$</span> repolens compare . \
+  --baseline .repolens/baselines/accepted.json \
+  --fail-on new-warning
+
+<span class="passed">Status POLICY PASSED</span>
+New    0 critical · 0 warning · 0 unknown
+Fixed  0 critical · 0 warning · 0 unknown
+Base   2026-07-28T09:00:00.000Z  .repolens/baselines/accepted.json
+Policy new-warning
+Score  94/100 · Grade A (secondary heuristic)
+Scope  126/132 files included · 6 excluded
+
+<span class="warning">WARN</span> Dependency update automation  −6
+<span class="dim">     No Dependabot or Renovate configuration was found.</span></pre>
       </aside>
     </div>
   </header>
 
   <main>
-    <section id="commands">
-      <p class="eyebrow">FOUR COMMANDS</p>
-      <h2>Local once. CI every change.</h2>
-      <div class="commands">
-        <article>
-          <span>01 / CONFIGURE</span>
-          <h3>init</h3>
-          <p>Create a documented policy and explicit path exclusions.</p>
-          <pre>npm install --global \
-  https://github.com/rad1092/repolens/releases/download/v0.2.0/rad1092-repolens-0.2.0.tgz
+    <section id="workflow">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">The repeatable loop</p>
+          <h2>Review once. Check every change.</h2>
+        </div>
+        <p>Start with a local report, inspect its evidence and exclusions, then commit the accepted JSON. The GitHub Action compares each later run with that file and fails on new or worsened warnings.</p>
+      </div>
 
-repolens init</pre>
-        </article>
-        <article>
-          <span>02 / INSPECT</span>
-          <h3>scan</h3>
-          <p>Inspect the current repository or an owner/repository target.</p>
-          <pre>repolens scan .</pre>
-        </article>
-        <article>
-          <span>03 / ACCEPT</span>
-          <h3>save</h3>
-          <p>Keep the reviewed state as a versioned JSON baseline.</p>
-          <pre>repolens scan . \
+      <div class="workflow-grid">
+        <article class="panel">
+          <p class="panel-label">01 / Accept a baseline</p>
+          <h3>Generate a reviewable JSON report</h3>
+          <p>Run this after configuring exclusions. Commit the file only after the remaining findings are understood.</p>
+          <pre class="code">repolens init
+repolens scan . \
   --format json \
   --output .repolens/baselines/accepted.json \
-  --fail-on none</pre>
+  --fail-on none
+
+git add .repolens.json \
+  .repolens/baselines/accepted.json
+git commit -m "chore: accept RepoLens baseline"</pre>
         </article>
-        <article>
-          <span>04 / VERIFY</span>
-          <h3>compare</h3>
-          <p>Gate new findings without failing on accepted historical debt.</p>
-          <pre>repolens compare . \
-  --baseline .repolens/baselines/accepted.json \
-  --fail-on new-warning</pre>
+
+        <article class="panel">
+          <p class="panel-label">02 / Gate future changes</p>
+          <h3>Compare in GitHub Actions</h3>
+          <p>The release commit and external actions are pinned to full SHAs. Reports remain available as the job summary and downloadable artifacts.</p>
+          <pre class="code">- uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+  with:
+    persist-credentials: false
+
+- id: repolens
+  uses: rad1092/repolens@00c84775267424a640abbee86fd2b1a1e5f6c159 # v0.2.0
+  env:
+    GITHUB_TOKEN: $&#123;&#123; github.token &#125;&#125;
+  with:
+    target: "."
+    config: ".repolens.json"
+    baseline: ".repolens/baselines/accepted.json"
+    fail-on: new-warning</pre>
         </article>
       </div>
     </section>
 
     <section>
-      <p class="eyebrow">OUTPUT THAT TRAVELS</p>
-      <h2>One model, four useful views.</h2>
-      <div class="facts">
-        <ul>
-          <li>Concise terminal triage for local work</li>
-          <li>Versioned JSON for baselines and automation</li>
-          <li>Standalone HTML for review or an artifact</li>
-          <li>GitHub Markdown summaries and annotations</li>
-        </ul>
-        <div class="boundary">
-          <strong>Inspection scope</strong>
-          <p>RepoLens reads tracked files and repository metadata while leaving the target unchanged. Permission gaps and rate limits stay visible as <em>unknown</em>. Dedicated security scanners remain the source for vulnerability findings.</p>
+      <div class="section-heading">
+        <div>
+          <p class="kicker">Results you can use</p>
+          <h2>One audit model, four outputs.</h2>
+        </div>
+        <p>The CLI and Action use the same findings, evidence identities, comparison counts, and policy result. Choose a view without changing what passed or failed.</p>
+      </div>
+
+      <div class="reports">
+        <article>
+          <strong>Terminal</strong>
+          <p>Prioritized findings and the next maintenance action during local work.</p>
+        </article>
+        <article>
+          <strong>JSON</strong>
+          <p>A versioned baseline and stable input for automation.</p>
+        </article>
+        <article>
+          <strong>HTML</strong>
+          <p>A standalone report for review and CI artifacts.</p>
+        </article>
+        <article>
+          <strong>GitHub</strong>
+          <p>Job summaries, annotations, counts, and report paths.</p>
+        </article>
+      </div>
+
+      <div class="boundary" aria-label="Inspection behavior">
+        <div>
+          <strong>Read-only scan</strong>
+          <p>Tracked files, Git history, and available repository metadata become evidence. The audited project stays unchanged.</p>
+        </div>
+        <div>
+          <strong>Unknown stays visible</strong>
+          <p>Permission gaps, timeouts, and unavailable metadata appear as unknown and can fail strict CI.</p>
+        </div>
+        <div>
+          <strong>Explicit policy</strong>
+          <p>Critical, warning, and new-regression counts drive the gate. The score remains secondary.</p>
         </div>
       </div>
     </section>
   </main>
 
   <footer>
-    <span>MIT licensed · Node.js 20.11+</span>
-    <a href="https://github.com/rad1092/repolens/blob/main/examples/repolens-workflow.yml">GitHub Action example ↗</a>
+    <span>RepoLens v0.2.0 · MIT · Node.js 20.11+</span>
+    <div>
+      <a href="https://github.com/rad1092/repolens/blob/main/examples/repolens-workflow.yml">Copyable workflow ↗</a>
+      <a href="https://github.com/rad1092/repolens#readme">Full documentation ↗</a>
+    </div>
   </footer>
 </body>
 </html>

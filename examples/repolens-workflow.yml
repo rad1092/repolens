@@ -1,3 +1,7 @@
+# Bootstrap this once, review the report, and commit it before enabling the gate:
+# repolens scan . --format json --output .repolens/baselines/accepted.json --fail-on none
+#
+# Replace the baseline only after the remaining findings are intentionally accepted.
 name: Repository maintenance
 
 on:
@@ -16,15 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - id: repolens
-        uses: rad1092/repolens@REPLACE_WITH_A_VERIFIED_FULL_COMMIT_SHA
+        uses: rad1092/repolens@00c84775267424a640abbee86fd2b1a1e5f6c159 # v0.2.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           target: "."
           config: ".repolens.json"
-          fail-on: critical
+          baseline: ".repolens/baselines/accepted.json"
+          fail-on: new-warning
 
       - if: always() && steps.repolens.outputs.report-json != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
