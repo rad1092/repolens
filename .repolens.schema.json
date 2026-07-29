@@ -5,15 +5,11 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema",
-    "excludes",
-    "staleDays",
-    "largeFileMB",
-    "policy"
+    "schema"
   ],
   "properties": {
     "schema": {
-      "const": 1
+      "const": 2
     },
     "excludes": {
       "type": "array",
@@ -24,21 +20,9 @@
       },
       "uniqueItems": true
     },
-    "staleDays": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "largeFileMB": {
-      "type": "number",
-      "exclusiveMinimum": 0
-    },
     "policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "failOn",
-        "strict"
-      ],
       "properties": {
         "failOn": {
           "enum": [
@@ -53,6 +37,177 @@
           "type": "boolean"
         }
       }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workflow/syntax": {
+          "$ref": "#/$defs/check"
+        },
+        "workflow/pull-request-trigger": {
+          "$ref": "#/$defs/check"
+        },
+        "workflow/permissions": {
+          "$ref": "#/$defs/check"
+        },
+        "workflow/action-pin": {
+          "$ref": "#/$defs/check"
+        },
+        "workflow/script-wiring": {
+          "$ref": "#/$defs/check"
+        },
+        "dependabot/syntax": {
+          "$ref": "#/$defs/check"
+        },
+        "dependabot/npm-coverage": {
+          "$ref": "#/$defs/check"
+        },
+        "dependabot/actions-coverage": {
+          "$ref": "#/$defs/check"
+        },
+        "node/package-json": {
+          "$ref": "#/$defs/check"
+        },
+        "node/lockfile-syntax": {
+          "$ref": "#/$defs/check"
+        },
+        "node/lockfile-sync": {
+          "$ref": "#/$defs/check"
+        },
+        "node/script-contract": {
+          "$ref": "#/$defs/check"
+        },
+        "repository/tracked-env": {
+          "$ref": "#/$defs/check"
+        },
+        "npm/update-available": {
+          "$ref": "#/$defs/check"
+        },
+        "coverage/npm": {
+          "$ref": "#/$defs/check"
+        },
+        "config/ignore-expired": {
+          "$ref": "#/$defs/check"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "expiration": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])[Tt](?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:[Zz]|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)$"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 8
+    },
+    "ignore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fingerprint",
+        "reason",
+        "expiresAt"
+      ],
+      "properties": {
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/expiration"
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "critical"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/expiration"
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ignore"
+          },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "required": [
+                  "reason",
+                  "expiresAt"
+                ]
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "severity"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "ignore"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "reason"
+                  ]
+                },
+                {
+                  "required": [
+                    "expiresAt"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
   }
 }

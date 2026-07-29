@@ -1,11 +1,15 @@
-import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { escape as escapeGlob } from "minimatch";
 
-import { auditTarget } from "./audit.js";
-import { compareWithBaseline, loadBaseline } from "./comparison.js";
+import { auditPreparedRepository } from "./audit.js";
+import {
+  compareWithAcceptedBaseline,
+  loadAcceptedBaseline,
+  validateBaselineCommit,
+} from "./baseline.js";
 import { loadConfig, resolveConfigPath } from "./config.js";
 import { evaluatePolicy, policyExitCode } from "./policy.js";
+import { prepareRepository } from "./scanner.js";
 import type {
   AuditReport,
   FailOn,
@@ -18,9 +22,6 @@ export interface AuditRunOptions {
   failOn: FailOn | null;
   strict: boolean | null;
   offline: boolean;
-  staleDays: number | null;
-  largeFileBytes: number | null;
-  maxTodoMatches: number;
   githubToken: string | null;
   now?: Date;
   signal?: AbortSignal;
@@ -32,17 +33,13 @@ export interface AuditRunResult {
   configSource: string | null;
 }
 
-async function baselinePathInsideTarget(
-  target: string,
+function baselinePathInsideTarget(
+  targetRoot: string,
   baselinePath: string | null,
-): Promise<string | null> {
+): string | null {
   if (!baselinePath) return null;
 
-  const targetRoot = resolve(target);
-  const targetStat = await stat(targetRoot).catch(() => null);
-  if (!targetStat?.isDirectory()) return null;
-
-  const relativePath = relative(targetRoot, resolve(baselinePath));
+  const relativePath = relative(targetRoot, baselinePath);
   if (
     relativePath.length === 0 ||
     relativePath === ".." ||
@@ -59,52 +56,67 @@ async function baselinePathInsideTarget(
 export async function runAudit(
   options: AuditRunOptions,
 ): Promise<AuditRunResult> {
-  const resolvedConfig = await resolveConfigPath(
+  const prepared = await prepareRepository(
     options.target,
-    options.configPath,
+    options.githubToken,
   );
-  const { config, source } = await loadConfig(
-    resolvedConfig.path,
-    resolvedConfig.required,
-  );
-  const baselineExclusion = await baselinePathInsideTarget(
-    options.target,
-    options.baselinePath,
-  );
-  const excludes = [...config.excludes];
-  if (baselineExclusion && !excludes.includes(baselineExclusion)) {
-    excludes.push(baselineExclusion);
-  }
-  const auditOptions = {
-    now: options.now ?? new Date(),
-    staleDays: options.staleDays ?? config.staleDays,
-    largeFileBytes:
-      options.largeFileBytes ??
-      Math.floor(config.largeFileMB * 1024 * 1024),
-    maxTodoMatches: options.maxTodoMatches,
-    offline: options.offline,
-    githubToken: options.githubToken,
-    excludes,
-    ...(options.signal ? { signal: options.signal } : {}),
-  };
-
-  let report = await auditTarget(options.target, auditOptions);
-  if (options.baselinePath) {
-    const baseline = await loadBaseline(options.baselinePath);
-    report = compareWithBaseline(
-      report,
-      baseline.report,
-      baseline.source,
+  try {
+    const target = prepared.identity.localPath;
+    const resolvedConfig = await resolveConfigPath(
+      target,
+      options.configPath,
     );
+    const { config, source } = await loadConfig(
+      resolvedConfig.path,
+      resolvedConfig.required,
+    );
+    const baselinePath = options.baselinePath
+      ? resolve(target, options.baselinePath)
+      : null;
+    const baselineExclusion = baselinePathInsideTarget(
+      target,
+      baselinePath,
+    );
+    const excludes = [...config.excludes];
+    if (baselineExclusion && !excludes.includes(baselineExclusion)) {
+      excludes.push(baselineExclusion);
+    }
+    const auditOptions = {
+      now: options.now ?? new Date(),
+      offline: options.offline,
+      githubToken: options.githubToken,
+      excludes,
+      checks: config.checks ?? {},
+      ...(options.signal ? { signal: options.signal } : {}),
+    };
+
+    let report = await auditPreparedRepository(
+      prepared.identity,
+      auditOptions,
+    );
+    if (baselinePath) {
+      const loaded = await loadAcceptedBaseline(
+        baselinePath,
+        options.now ?? new Date(),
+      );
+      await validateBaselineCommit(target, loaded.baseline);
+      report = compareWithAcceptedBaseline(
+        report,
+        loaded.baseline,
+        loaded.source,
+      );
+    }
+    report = evaluatePolicy(
+      report,
+      options.failOn ?? config.policy.failOn,
+      options.strict ?? config.policy.strict,
+    );
+    return {
+      report,
+      exitCode: policyExitCode(report),
+      configSource: source,
+    };
+  } finally {
+    await prepared.cleanup();
   }
-  report = evaluatePolicy(
-    report,
-    options.failOn ?? config.policy.failOn,
-    options.strict ?? config.policy.strict,
-  );
-  return {
-    report,
-    exitCode: policyExitCode(report),
-    configSource: source,
-  };
 }

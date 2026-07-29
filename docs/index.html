@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="RepoLens is a read-only repository maintenance CLI and GitHub Action that shows evidence, compares an accepted baseline, and blocks new regressions in CI.">
+  <meta name="description" content="RepoLens is a read-only regression gate for the Node and GitHub repository-maintenance contract.">
   <link rel="canonical" href="https://repolens.whago.net/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://repolens.whago.net/">
-  <meta property="og:title" content="RepoLens — repository maintenance CLI and GitHub Action">
-  <meta property="og:description" content="Review repository evidence once, accept a baseline, and block new maintenance regressions on every change.">
+  <meta property="og:title" content="RepoLens — maintenance regression gate">
+  <meta property="og:description" content="Review existing repository debt once, then annotate only new maintenance regressions.">
   <meta property="og:image" content="https://repolens.whago.net/og.png">
   <meta property="og:image:width" content="1731">
   <meta property="og:image:height" content="909">
   <meta property="og:image:alt" content="RepoLens CLI and GitHub Action maintenance result">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://repolens.whago.net/og.png">
-  <title>RepoLens — repository maintenance CLI and GitHub Action</title>
+  <title>RepoLens — maintenance regression gate</title>
   <style>
     :root {
       color-scheme: dark;
@@ -246,11 +246,11 @@
     <div class="hero">
       <div>
         <p class="kicker">CLI + GitHub Action</p>
-        <h1>See what changed. Stop new repo debt.</h1>
-        <p class="lede">RepoLens turns tracked files and repository metadata into evidence a maintainer can review locally, accept as a baseline, and enforce on every pull request.</p>
+        <h1>Catch repository regressions before merge.</h1>
+        <p class="lede">RepoLens validates a focused Node and GitHub maintenance contract, separates reviewed existing debt from new findings, and puts file-and-line evidence on the pull request.</p>
         <div class="hero-actions">
           <a href="#workflow">Set up the maintenance loop</a>
-          <a href="https://github.com/rad1092/repolens/releases/tag/v0.2.0">Install v0.2.0 ↗</a>
+          <a href="https://github.com/rad1092/repolens/releases/tag/v0.3.0">Install v0.3.0 ↗</a>
         </div>
       </div>
 
@@ -263,16 +263,16 @@
   --baseline .repolens/baselines/accepted.json \
   --fail-on new-warning
 
-<span class="passed">Status POLICY PASSED</span>
-New    0 critical · 0 warning · 0 unknown
-Fixed  0 critical · 0 warning · 0 unknown
-Base   2026-07-28T09:00:00.000Z  .repolens/baselines/accepted.json
-Policy new-warning
-Score  94/100 · Grade A (secondary heuristic)
-Scope  126/132 files included · 6 excluded
+<span class="passed">Status NO NEW REGRESSIONS</span>
+New      0
+Accepted 2
+Unknown  0
+Ignored  0
+Policy   new-warning
+Scope    126/132 files included · 6 excluded
 
-<span class="warning">WARN</span> Dependency update automation  −6
-<span class="dim">     No Dependabot or Renovate configuration was found.</span></pre>
+<span class="dim">Accepted debt remains in the report without
+repeating pull-request annotations.</span></pre>
       </aside>
     </div>
   </header>
@@ -284,42 +284,38 @@ Scope  126/132 files included · 6 excluded
           <p class="kicker">The repeatable loop</p>
           <h2>Review once. Check every change.</h2>
         </div>
-        <p>Start with a local report, inspect its evidence and exclusions, then commit the accepted JSON. The GitHub Action compares each later run with that file and fails on new or worsened warnings.</p>
+        <p>Setup creates one rule policy, one compact acceptance record, and one SHA-pinned workflow. The Action reads the base branch baseline and blocks only new or worsened findings.</p>
       </div>
 
       <div class="workflow-grid">
         <article class="panel">
           <p class="panel-label">01 / Accept a baseline</p>
-          <h3>Generate a reviewable JSON report</h3>
-          <p>Run this after configuring exclusions. Commit the file only after the remaining findings are understood.</p>
-          <pre class="code">repolens init
-repolens scan . \
-  --format json \
-  --output .repolens/baselines/accepted.json \
-  --fail-on none
+          <h3>Record reviewed existing debt</h3>
+          <p>Reason, owner, expiration, and base commit are required evidence. The baseline never updates implicitly.</p>
+          <pre class="code">repolens setup . \
+  --reason "Existing findings reviewed" \
+  --owner "Repository maintainers"
 
 git add .repolens.json \
-  .repolens/baselines/accepted.json
-git commit -m "chore: accept RepoLens baseline"</pre>
+  .repolens/baselines/accepted.json \
+  .github/workflows/repolens.yml
+git commit -m "chore: enable RepoLens"</pre>
         </article>
 
         <article class="panel">
           <p class="panel-label">02 / Gate future changes</p>
-          <h3>Compare in GitHub Actions</h3>
-          <p>The release commit and external actions are pinned to full SHAs. Reports remain available as the job summary and downloadable artifacts.</p>
-          <pre class="code">- uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-  with:
-    persist-credentials: false
+          <h3>Annotate only new regressions</h3>
+          <p>The generated workflow pins every external action to a full SHA. Accepted debt stays in the summary; new findings get file-and-line annotations plus SARIF.</p>
+          <pre class="code">repolens doctor .
+repolens baseline check . --offline
 
-- id: repolens
-  uses: rad1092/repolens@00c84775267424a640abbee86fd2b1a1e5f6c159 # v0.2.0
-  env:
-    GITHUB_TOKEN: $&#123;&#123; github.token &#125;&#125;
-  with:
-    target: "."
-    config: ".repolens.json"
-    baseline: ".repolens/baselines/accepted.json"
-    fail-on: new-warning</pre>
+# Pull requests cannot change the baseline
+# and use that edit to approve themselves.
+#
+# Gate results:
+#   0  no new regression
+#   1  regression blocked
+#   2  inspection incomplete</pre>
         </article>
       </div>
     </section>
@@ -328,7 +324,7 @@ git commit -m "chore: accept RepoLens baseline"</pre>
       <div class="section-heading">
         <div>
           <p class="kicker">Results you can use</p>
-          <h2>One audit model, four outputs.</h2>
+          <h2>One finding model, five outputs.</h2>
         </div>
         <p>The CLI and Action use the same findings, evidence identities, comparison counts, and policy result. Choose a view without changing what passed or failed.</p>
       </div>
@@ -340,7 +336,7 @@ git commit -m "chore: accept RepoLens baseline"</pre>
         </article>
         <article>
           <strong>JSON</strong>
-          <p>A versioned baseline and stable input for automation.</p>
+          <p>Machine-readable audit output for automation. Acceptance stays in a separate compact baseline.</p>
         </article>
         <article>
           <strong>HTML</strong>
@@ -348,31 +344,35 @@ git commit -m "chore: accept RepoLens baseline"</pre>
         </article>
         <article>
           <strong>GitHub</strong>
-          <p>Job summaries, annotations, counts, and report paths.</p>
+          <p>Job summaries, new-only annotations, counts, and artifact paths.</p>
+        </article>
+        <article>
+          <strong>SARIF</strong>
+          <p>Stable rule IDs, fingerprints, and file locations for code scanning.</p>
         </article>
       </div>
 
       <div class="boundary" aria-label="Inspection behavior">
         <div>
-          <strong>Read-only scan</strong>
-          <p>Tracked files, Git history, and available repository metadata become evidence. The audited project stays unchanged.</p>
+          <strong>Read-only validation</strong>
+          <p>RepoLens parses repository configuration and traces CI wiring. It never executes the audited scripts.</p>
         </div>
         <div>
           <strong>Unknown stays visible</strong>
           <p>Permission gaps, timeouts, and unavailable metadata appear as unknown and can fail strict CI.</p>
         </div>
         <div>
-          <strong>Explicit policy</strong>
-          <p>Critical, warning, and new-regression counts drive the gate. The score remains secondary.</p>
+          <strong>Bounded scope</strong>
+          <p>RepoLens covers the Node and GitHub maintenance contract. Dedicated scanners keep ownership of code and security analysis.</p>
         </div>
       </div>
     </section>
   </main>
 
   <footer>
-    <span>RepoLens v0.2.0 · MIT · Node.js 20.11+</span>
+    <span>RepoLens v0.3.0 · MIT · Node.js 20.11+</span>
     <div>
-      <a href="https://github.com/rad1092/repolens/blob/main/examples/repolens-workflow.yml">Copyable workflow ↗</a>
+      <a href="https://github.com/rad1092/repolens#start-the-gate">Setup guide ↗</a>
       <a href="https://github.com/rad1092/repolens#readme">Full documentation ↗</a>
     </div>
   </footer>

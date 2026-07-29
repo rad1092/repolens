@@ -1,7 +1,7 @@
 {
   "name": "@rad1092/repolens",
-  "version": "0.2.0",
-  "description": "Read-only repository maintenance triage as a CLI and GitHub Action.",
+  "version": "0.3.0",
+  "description": "Read-only Node and GitHub maintenance regression gate as a CLI and GitHub Action.",
   "type": "module",
   "bin": {
     "repolens": "./dist/src/cli.js"
@@ -52,13 +52,14 @@
     "access": "public"
   },
   "dependencies": {
-    "minimatch": "^10.0.3",
-    "semver": "^7.7.2"
+    "minimatch": "^10.2.6",
+    "semver": "^7.8.5",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.18.6",
+    "@types/node": "^26.1.2",
     "@types/semver": "^7.7.1",
-    "esbuild": "^0.25.10",
-    "typescript": "^5.9.2"
+    "esbuild": "^0.28.1",
+    "typescript": "^5.9.3"
   }
 }
