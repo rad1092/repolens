@@ -1,5 +1,14 @@
-export { auditTarget, createAuditReport } from "./audit.js";
-export { compareWithBaseline, loadBaseline } from "./comparison.js";
+export {
+  auditPreparedRepository,
+  auditTarget,
+  createAuditReport,
+} from "./audit.js";
+export {
+  buildAcceptedBaseline,
+  compareWithAcceptedBaseline,
+  loadAcceptedBaseline,
+  parseBaselineV3,
+} from "./baseline.js";
 export {
   DEFAULT_CONFIG,
   loadConfig,
@@ -14,6 +23,8 @@ export {
   renderTerminal,
 } from "./reporters.js";
 export { runAudit } from "./runner.js";
+export { renderSarif } from "./sarif.js";
+export { setupRepository } from "./setup.js";
 export { prepareRepository, scanRepository } from "./scanner.js";
 export type {
   AuditOptions,

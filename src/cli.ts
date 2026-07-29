@@ -5,98 +5,81 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseFailOn, writeDefaultConfig } from "./config.js";
 import {
-  DEFAULT_MAX_TODO_MATCHES,
-  TOOL_VERSION,
-} from "./constants.js";
+  loadAcceptedBaseline,
+  validateBaselineCommit,
+} from "./baseline.js";
+import {
+  loadConfig,
+  parseFailOn,
+  resolveConfigPath,
+  writeDefaultConfig,
+} from "./config.js";
+import { TOOL_VERSION } from "./constants.js";
+import { asRepoLensError, RepoLensError } from "./errors.js";
 import {
   renderGitHubMarkdown,
   renderHtml,
   renderJson,
   renderTerminal,
 } from "./reporters.js";
+import { RULES } from "./rules.js";
 import { runAudit } from "./runner.js";
+import { renderSarif } from "./sarif.js";
+import {
+  acceptCurrentBaseline,
+  DEFAULT_BASELINE_PATH,
+  setupRepository,
+} from "./setup.js";
 import type {
+  BaselineAcceptCliOptions,
+  BaselineCheckCliOptions,
   CliOptions,
+  DoctorCliOptions,
+  ExplainCliOptions,
   InitCliOptions,
   ReportFormat,
   ScanCliOptions,
+  SetupCliOptions,
 } from "./types.js";
+
 const HELP = `RepoLens ${TOOL_VERSION}
-Read-only maintenance triage for any local or GitHub repository.
+Block new Node + GitHub repository-maintenance regressions.
 
 Usage:
+  repolens setup [directory] [options]
   repolens scan [target] [options]
-  repolens compare [target] --baseline <report.json> [options]
-  repolens init [directory] [--force]
+  repolens compare [target] --baseline <baseline.json> [options]
+  repolens baseline accept [target] [options]
+  repolens baseline check [target] [options]
+  repolens doctor [target]
+  repolens explain <rule-id>
 
-Targets:
-  .                              Local repository (default)
-  /path/to/repository            Local repository
-  owner/repository               GitHub repository
-  https://github.com/owner/repo  GitHub repository URL
+Setup and acceptance:
+  --reason <text>       Why current debt is accepted
+  --owner <name>        Reviewer responsible for the acceptance
+  --expires <ISO time>  Acceptance expiration (default: 90 days)
+  --action-sha <sha>    Immutable Action commit; resolved from this release by default
+  --from-v2 <report>    Record an explicit migration from a reviewed v2 report
+  --force               Replace the requested setup or baseline file
 
-Scan and compare options:
-  -f, --format <value>       terminal, json, html, github, all, or a list
-  -o, --output <path>       Write one report to a file or reports to a directory
-      --config <path>       Read an explicit .repolens.json
-      --baseline <path>     Compare with a RepoLens JSON report
-      --fail-on <policy>    none, critical, warning, new-critical, new-warning
-      --strict              Treat unknown inspection areas as exit 2
-      --no-strict           Keep unknown areas visible without exit 2
-      --offline             Skip GitHub API and npm registry checks
-      --token-env <name>    Environment variable containing a GitHub token
-                            (default: GITHUB_TOKEN; tokens are never written)
-      --stale-days <days>   Override the configured commit age threshold
-      --large-file-mb <mb>  Override the configured tracked-file threshold
-      --max-todos <count>   Maximum TODO/FIXME evidence rows (default: 50)
-      --no-color            Disable ANSI colors
-
-Init options:
-      --force               Replace an existing .repolens.json
+Scan and compare:
+  -f, --format <value>  terminal,json,html,github,sarif,all
+  -o, --output <path>   Report file or directory
+  --config <path>       Explicit .repolens.json
+  --baseline <path>     Compact RepoLens baseline schemaVersion 3
+  --fail-on <policy>    none,critical,warning,new-critical,new-warning
+  --strict              Exit 2 when requested coverage is unknown
+  --offline             Skip optional npm registry metadata
+  --token-env <name>    Token used to clone a private GitHub target (default: GITHUB_TOKEN)
 
 Exit codes:
-  0  Inspection completed and policy passed
-  1  Inspection completed and policy failed
-  2  Configuration, network/permission in strict mode, or execution error
+  0  Gate passed
+  1  Maintenance policy blocked a regression
+  2  Configuration, baseline, coverage, or execution was incomplete
 
-Examples:
-  repolens init
-  repolens scan .
-  repolens scan owner/repo --format all --output reports
-  repolens compare . --baseline .repolens/baselines/accepted.json --fail-on new-warning
-
-Safety:
-  Scans do not install dependencies, run repository scripts, or edit the target.
-  init and explicit report output are the only repository-adjacent writes.
+RepoLens validates configuration and wiring. It never executes audited scripts.
 `;
-
-function positiveNumber(value: string, option: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${option} requires a positive number.`);
-  }
-  return parsed;
-}
-
-function parseFormats(value: string): ReportFormat[] {
-  const requested = value
-    .split(",")
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
-  const expanded = requested.includes("all")
-    ? ["terminal", "json", "html", "github"]
-    : requested;
-  const allowed = new Set(["terminal", "json", "html", "github"]);
-  for (const format of expanded) {
-    if (!allowed.has(format)) {
-      throw new Error(`Unknown report format: ${format}`);
-    }
-  }
-  if (expanded.length === 0) throw new Error("At least one format is required.");
-  return [...new Set(expanded as ReportFormat[])];
-}
 
 function optionValue(
   argument: string,
@@ -106,36 +89,154 @@ function optionValue(
   const equals = argument.indexOf("=");
   if (equals >= 0) {
     const value = argument.slice(equals + 1);
-    if (!value) throw new Error(`${argument.slice(0, equals)} requires a value.`);
+    if (!value) {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        `${argument.slice(0, equals)} requires a value.`,
+      );
+    }
     return { value, consumed: 0 };
   }
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
-    throw new Error(`${argument} requires a value.`);
+    throw new RepoLensError(
+      "EXECUTION_FAILED",
+      `${argument} requires a value.`,
+    );
   }
   return { value, consumed: 1 };
 }
 
+function parseFormats(value: string): ReportFormat[] {
+  const requested = value
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  const expanded = requested.includes("all")
+    ? ["terminal", "json", "html", "github", "sarif"]
+    : requested;
+  const allowed = new Set([
+    "terminal",
+    "json",
+    "html",
+    "github",
+    "sarif",
+  ]);
+  for (const format of expanded) {
+    if (!allowed.has(format)) {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        `Unknown report format: ${format}`,
+      );
+    }
+  }
+  if (expanded.length === 0) {
+    throw new RepoLensError(
+      "EXECUTION_FAILED",
+      "At least one format is required.",
+    );
+  }
+  return [...new Set(expanded as ReportFormat[])];
+}
+
 function parseInit(args: string[]): InitCliOptions {
+  let target = ".";
+  let force = false;
+  for (const argument of args) {
+    if (argument === "--force") force = true;
+    else if (!argument.startsWith("-") && target === ".") target = argument;
+    else {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        `Unknown init argument: ${argument}`,
+      );
+    }
+  }
+  return { command: "init", target, force };
+}
+
+function parseAcceptanceArgs(
+  args: string[],
+  command: "setup" | "baseline-accept",
+): SetupCliOptions | BaselineAcceptCliOptions {
   let target = ".";
   let targetSeen = false;
   let force = false;
-  for (const argument of args) {
+  let reason: string | null = null;
+  let owner: string | null = null;
+  let expiresAt: string | null = null;
+  let actionSha: string | null = null;
+  let output: string | null = null;
+  let fromV2: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? "";
     if (argument === "--force") {
       force = true;
       continue;
     }
-    if (argument === "-h" || argument === "--help") {
-      throw new Error('Use "repolens --help" for command help.');
+    const optionName = argument.includes("=")
+      ? argument.slice(0, argument.indexOf("="))
+      : argument;
+    if (
+      optionName === "--reason" ||
+      optionName === "--owner" ||
+      optionName === "--expires" ||
+      optionName === "--action-sha" ||
+      optionName === "--output" ||
+      optionName === "--from-v2"
+    ) {
+      const parsed = optionValue(argument, args, index);
+      index += parsed.consumed;
+      if (optionName === "--reason") reason = parsed.value;
+      if (optionName === "--owner") owner = parsed.value;
+      if (optionName === "--expires") expiresAt = parsed.value;
+      if (optionName === "--action-sha") actionSha = parsed.value;
+      if (optionName === "--output") output = parsed.value;
+      if (optionName === "--from-v2") fromV2 = parsed.value;
+      continue;
     }
-    if (argument.startsWith("-")) {
-      throw new Error(`Unknown init option: ${argument}`);
+    if (argument.startsWith("-") || targetSeen) {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        `Unknown ${command} argument: ${argument}`,
+      );
     }
-    if (targetSeen) throw new Error("init accepts only one directory.");
     target = argument;
     targetSeen = true;
   }
-  return { command: "init", target, force };
+  if (command === "setup") {
+    if (output || fromV2) {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        "setup does not accept --output or --from-v2.",
+      );
+    }
+    return {
+      command,
+      target,
+      force,
+      reason,
+      owner,
+      expiresAt,
+      actionSha,
+    };
+  }
+  if (actionSha) {
+    throw new RepoLensError(
+      "EXECUTION_FAILED",
+      "baseline accept does not accept --action-sha.",
+    );
+  }
+  return {
+    command,
+    target,
+    output,
+    reason,
+    owner,
+    expiresAt,
+    fromV2,
+    force,
+  };
 }
 
 function parseScan(
@@ -151,62 +252,44 @@ function parseScan(
   let failOn: ScanCliOptions["failOn"] = null;
   let strict: boolean | null = null;
   let offline = false;
-  let staleDays: number | null = null;
-  let largeFileBytes: number | null = null;
-  let maxTodoMatches = DEFAULT_MAX_TODO_MATCHES;
   let tokenEnv = "GITHUB_TOKEN";
   let noColor = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index] ?? "";
-    if (argument === "--") {
-      const rest = args.slice(index + 1);
-      if (rest.length !== 1 || targetSeen) {
-        throw new Error("Exactly one target may follow --.");
-      }
-      target = rest[0] ?? ".";
-      targetSeen = true;
-      break;
-    }
     if (argument === "--offline") {
       offline = true;
+      continue;
+    }
+    if (argument === "--strict" || argument === "--no-strict") {
+      strict = argument === "--strict";
       continue;
     }
     if (argument === "--no-color") {
       noColor = true;
       continue;
     }
-    if (argument === "--strict") {
-      strict = true;
-      continue;
-    }
-    if (argument === "--no-strict") {
-      strict = false;
-      continue;
-    }
     if (argument === "--token" || argument.startsWith("--token=")) {
-      throw new Error(
-        "Raw tokens are not accepted. Put the token in an environment variable and use --token-env.",
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        "Raw tokens are not accepted. Use --token-env.",
       );
     }
-
-    const valuedOptions = new Set([
-      "-f",
-      "--format",
-      "-o",
-      "--output",
-      "--config",
-      "--baseline",
-      "--fail-on",
-      "--token-env",
-      "--stale-days",
-      "--large-file-mb",
-      "--max-todos",
-    ]);
     const optionName = argument.includes("=")
       ? argument.slice(0, argument.indexOf("="))
       : argument;
-    if (valuedOptions.has(optionName)) {
+    if (
+      [
+        "-f",
+        "--format",
+        "-o",
+        "--output",
+        "--config",
+        "--baseline",
+        "--fail-on",
+        "--token-env",
+      ].includes(optionName)
+    ) {
       const parsed = optionValue(argument, args, index);
       index += parsed.consumed;
       if (optionName === "-f" || optionName === "--format") {
@@ -221,32 +304,29 @@ function parseScan(
         failOn = parseFailOn(parsed.value, "--fail-on");
       } else if (optionName === "--token-env") {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(parsed.value)) {
-          throw new Error("--token-env must be a valid environment variable name.");
+          throw new RepoLensError(
+            "EXECUTION_FAILED",
+            "--token-env must be an environment variable name.",
+          );
         }
         tokenEnv = parsed.value;
-      } else if (optionName === "--stale-days") {
-        staleDays = Math.floor(positiveNumber(parsed.value, "--stale-days"));
-      } else if (optionName === "--large-file-mb") {
-        largeFileBytes = Math.floor(
-          positiveNumber(parsed.value, "--large-file-mb") * 1024 * 1024,
-        );
-      } else if (optionName === "--max-todos") {
-        maxTodoMatches = Math.floor(
-          positiveNumber(parsed.value, "--max-todos"),
-        );
       }
       continue;
     }
-    if (argument.startsWith("-")) {
-      throw new Error(`Unknown option: ${argument}`);
+    if (argument.startsWith("-") || targetSeen) {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        `Unknown scan argument: ${argument}`,
+      );
     }
-    if (targetSeen) throw new Error("Only one repository target is accepted.");
     target = argument;
     targetSeen = true;
   }
-
   if (command === "compare" && !baselinePath) {
-    throw new Error("compare requires --baseline <report.json>.");
+    throw new RepoLensError(
+      "BASELINE_INVALID",
+      "compare requires --baseline <baseline.json>.",
+    );
   }
   return {
     command,
@@ -258,43 +338,89 @@ function parseScan(
     failOn,
     strict,
     offline,
-    staleDays,
-    largeFileBytes,
-    maxTodoMatches,
     tokenEnv,
     noColor,
   };
 }
 
-export function parseCliArgs(args: string[]): CliOptions | "help" | "version" {
+function parseBaselineCheck(args: string[]): BaselineCheckCliOptions {
+  const scan = parseScan("scan", args);
+  if (
+    scan.formats.length !== 1 ||
+    scan.formats[0] !== "terminal" ||
+    scan.output ||
+    scan.failOn ||
+    scan.tokenEnv !== "GITHUB_TOKEN" ||
+    scan.noColor
+  ) {
+    throw new RepoLensError(
+      "EXECUTION_FAILED",
+      "baseline check accepts target, --baseline, --config, --strict, and --offline.",
+    );
+  }
+  return {
+    command: "baseline-check",
+    target: scan.target,
+    baselinePath: scan.baselinePath,
+    configPath: scan.configPath,
+    strict: scan.strict,
+    offline: scan.offline,
+  };
+}
+
+export function parseCliArgs(
+  args: string[],
+): CliOptions | "help" | "version" {
+  if (args.length === 0) return parseScan("scan", []);
   if (args.includes("-h") || args.includes("--help")) return "help";
   if (args.includes("-v") || args.includes("--version")) return "version";
-  const [first, ...rest] = args;
-  if (first === "init") return parseInit(rest);
-  if (first === "scan" || first === "compare") return parseScan(first, rest);
+  const [first, second, ...rest] = args;
+  if (first === "setup") return parseAcceptanceArgs([second, ...rest].filter((item): item is string => item !== undefined), "setup");
+  if (first === "init") return parseInit([second, ...rest].filter((item): item is string => item !== undefined));
+  if (first === "doctor") {
+    const target = second ?? ".";
+    if (rest.length > 0 || target.startsWith("-")) {
+      throw new RepoLensError("EXECUTION_FAILED", "doctor accepts one target.");
+    }
+    return { command: "doctor", target } satisfies DoctorCliOptions;
+  }
+  if (first === "explain") {
+    if (!second || rest.length > 0) {
+      throw new RepoLensError(
+        "EXECUTION_FAILED",
+        "explain requires one rule ID.",
+      );
+    }
+    return { command: "explain", ruleId: second } satisfies ExplainCliOptions;
+  }
+  if (first === "baseline") {
+    if (second === "accept") {
+      return parseAcceptanceArgs(rest, "baseline-accept");
+    }
+    if (second === "check") return parseBaselineCheck(rest);
+    throw new RepoLensError(
+      "EXECUTION_FAILED",
+      "baseline requires accept or check.",
+    );
+  }
+  if (first === "scan" || first === "compare") {
+    return parseScan(first, [second, ...rest].filter((item): item is string => item !== undefined));
+  }
   return parseScan("scan", args);
 }
 
 async function pathIsDirectory(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-async function writeSingleReport(path: string, content: string): Promise<void> {
-  const absolute = resolve(path);
-  await mkdir(dirname(absolute), { recursive: true });
-  await writeFile(absolute, content, { encoding: "utf8", mode: 0o644 });
-  process.stderr.write(`RepoLens wrote ${absolute}\n`);
+  return (await stat(path).catch(() => null))?.isDirectory() === true;
 }
 
 export async function emitReports(
   options: ScanCliOptions,
   report: Awaited<ReturnType<typeof runAudit>>["report"],
 ): Promise<void> {
-  const renderers = {
+  const sarifRoot = (await pathIsDirectory(options.target))
+    ? resolve(options.target)
+    : null;
+  const renderers: Record<ReportFormat, () => string> = {
     terminal: () =>
       renderTerminal(report, {
         color:
@@ -305,53 +431,119 @@ export async function emitReports(
     json: () => renderJson(report),
     html: () => renderHtml(report),
     github: () => renderGitHubMarkdown(report),
-  } as const;
-  const extensions = {
+    sarif: () => renderSarif(report, sarifRoot),
+  };
+  const extensions: Record<ReportFormat, string> = {
     terminal: "txt",
     json: "json",
     html: "html",
     github: "md",
-  } as const;
-
+    sarif: "sarif",
+  };
+  if (!options.output && options.formats.length === 1) {
+    const format = options.formats[0] ?? "terminal";
+    process.stdout.write(renderers[format]());
+    return;
+  }
   if (!options.output) {
-    if (options.formats.length === 1) {
-      const format = options.formats[0];
-      if (format) process.stdout.write(renderers[format]());
-      return;
-    }
     for (const format of options.formats) {
-      if (format === "terminal") {
-        process.stdout.write(renderers.terminal());
-      } else {
-        await writeSingleReport(
-          `repolens-report.${extensions[format]}`,
-          renderers[format](),
-        );
+      if (format === "terminal") process.stdout.write(renderers[format]());
+      else {
+        const path = resolve(`repolens-report.${extensions[format]}`);
+        await writeFile(path, renderers[format](), "utf8");
+        process.stderr.write(`RepoLens wrote ${path}\n`);
       }
     }
     return;
   }
-
   if (options.formats.length === 1) {
-    const format = options.formats[0];
-    if (!format) return;
-    const outputIsDirectory =
+    const format = options.formats[0] ?? "terminal";
+    const destination =
       (await pathIsDirectory(options.output)) ||
-      (extname(options.output) === "" && options.output.endsWith("/"));
-    const destination = outputIsDirectory
-      ? join(options.output, `repolens-report.${extensions[format]}`)
-      : options.output;
-    await writeSingleReport(destination, renderers[format]());
+      (extname(options.output) === "" && options.output.endsWith("/"))
+        ? join(options.output, `repolens-report.${extensions[format]}`)
+        : options.output;
+    await mkdir(dirname(resolve(destination)), { recursive: true });
+    await writeFile(resolve(destination), renderers[format](), "utf8");
+    process.stderr.write(`RepoLens wrote ${resolve(destination)}\n`);
     return;
   }
-
   await mkdir(resolve(options.output), { recursive: true });
   for (const format of options.formats) {
-    await writeSingleReport(
-      join(options.output, `repolens-report.${extensions[format]}`),
-      renderers[format](),
+    const destination = join(
+      resolve(options.output),
+      `repolens-report.${extensions[format]}`,
+    );
+    await writeFile(destination, renderers[format](), "utf8");
+    process.stderr.write(`RepoLens wrote ${destination}\n`);
+  }
+}
+
+async function runScan(options: ScanCliOptions): Promise<number> {
+  const result = await runAudit({
+    target: options.target,
+    configPath: options.configPath,
+    baselinePath: options.baselinePath,
+    failOn: options.failOn,
+    strict: options.strict,
+    offline: options.offline,
+    githubToken: process.env[options.tokenEnv] || null,
+  });
+  await emitReports(options, result.report);
+  return result.exitCode;
+}
+
+async function runBaselineCheck(
+  options: BaselineCheckCliOptions,
+): Promise<number> {
+  const result = await runAudit({
+    target: options.target,
+    configPath: options.configPath,
+    baselinePath: options.baselinePath ?? DEFAULT_BASELINE_PATH,
+    failOn: "new-warning",
+    strict: options.strict,
+    offline: options.offline,
+    githubToken: process.env.GITHUB_TOKEN || null,
+  });
+  process.stdout.write(
+    renderTerminal(result.report, {
+      color: process.stdout.isTTY === true && !("NO_COLOR" in process.env),
+    }),
+  );
+  return result.exitCode;
+}
+
+async function runDoctor(options: DoctorCliOptions): Promise<number> {
+  const target = resolve(options.target);
+  const configPath = await resolveConfigPath(target, null);
+  const checks: string[] = [];
+  const { config, source } = await loadConfig(configPath.path, true);
+  checks.push(`config: ${source} · schema ${config.schema}`);
+  const baselinePath = join(target, DEFAULT_BASELINE_PATH);
+  const loaded = await loadAcceptedBaseline(baselinePath);
+  await validateBaselineCommit(target, loaded.baseline);
+  checks.push(
+    `baseline: ${baselinePath} · ${loaded.baseline.accepted.length} accepted · expires ${loaded.baseline.acceptance.expiresAt}`,
+  );
+  checks.push("scope: Node + GitHub");
+  process.stdout.write(
+    `RepoLens doctor\n${checks.map((item) => `OK  ${item}`).join("\n")}\n`,
+  );
+  return 0;
+}
+
+function runExplain(options: ExplainCliOptions): number {
+  const rule = RULES.get(options.ruleId);
+  if (!rule) {
+    throw new RepoLensError(
+      "EXECUTION_FAILED",
+      `Unknown rule ID ${options.ruleId}. Known rules:\n${[...RULES.keys()].sort().join("\n")}`,
     );
   }
+  process.stdout.write(
+    `${rule.id}\n${rule.title}\n\n${rule.explanation}\n\nFix\n${rule.remediation}\n`,
+  );
+  return 0;
 }
 
 export async function runCli(args: string[]): Promise<number> {
@@ -365,36 +557,34 @@ export async function runCli(args: string[]): Promise<number> {
     return 0;
   }
   if (parsed.command === "init") {
-    const destination = await writeDefaultConfig(parsed.target, parsed.force);
+    const destination = await writeDefaultConfig(
+      parsed.target,
+      parsed.force,
+    );
     process.stdout.write(`RepoLens wrote ${destination}\n`);
     return 0;
   }
-
-  const controller = new AbortController();
-  const stop = () => controller.abort();
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-
-  try {
-    const result = await runAudit({
-      target: parsed.target,
-      configPath: parsed.configPath,
-      baselinePath: parsed.baselinePath,
-      failOn: parsed.failOn,
-      strict: parsed.strict,
-      offline: parsed.offline,
-      staleDays: parsed.staleDays,
-      largeFileBytes: parsed.largeFileBytes,
-      maxTodoMatches: parsed.maxTodoMatches,
-      githubToken: process.env[parsed.tokenEnv] || null,
-      signal: controller.signal,
+  if (parsed.command === "setup") {
+    const result = await setupRepository({
+      ...parsed,
+      githubToken: process.env.GITHUB_TOKEN || null,
     });
-    await emitReports(parsed, result.report);
-    return result.exitCode;
-  } finally {
-    process.removeListener("SIGINT", stop);
-    process.removeListener("SIGTERM", stop);
+    process.stdout.write(
+      `RepoLens setup complete\n${result.config}\n${result.baseline}\n${result.workflow}\nAction ${result.actionSha}\n`,
+    );
+    return 0;
   }
+  if (parsed.command === "baseline-accept") {
+    const destination = await acceptCurrentBaseline(parsed);
+    process.stdout.write(`RepoLens wrote ${destination}\n`);
+    return 0;
+  }
+  if (parsed.command === "baseline-check") {
+    return runBaselineCheck(parsed);
+  }
+  if (parsed.command === "doctor") return runDoctor(parsed);
+  if (parsed.command === "explain") return runExplain(parsed);
+  return runScan(parsed);
 }
 
 function runningAsEntrypoint(): boolean {
@@ -416,9 +606,9 @@ if (runningAsEntrypoint()) {
       process.exitCode = code;
     })
     .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
+      const failure = asRepoLensError(error);
       process.stderr.write(
-        `RepoLens: ${message}\nRun "repolens --help" for usage.\n`,
+        `RepoLens [${failure.code}] ${failure.message}\nRun "repolens --help" for usage.\n`,
       );
       process.exitCode = 2;
     });

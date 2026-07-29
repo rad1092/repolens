@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const releaseCommit = "00c84775267424a640abbee86fd2b1a1e5f6c159";
 const testRoot = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testRoot, "../..");
 
@@ -63,48 +62,38 @@ test("keeps product documentation on the independent RepoLens origin", async () 
   );
 });
 
-test("ships a copyable baseline-aware Action workflow pinned to v0.2.0", async () => {
-  const [example, readme, landing] = await Promise.all([
+test("documents the v0.3 regression gate without stale score or mutable Action guidance", async () => {
+  const [example, readme, landing, actionRaw, packageRaw] = await Promise.all([
     repositoryFile("examples/repolens-workflow.yml"),
     repositoryFile("README.md"),
     repositoryFile("docs/index.html"),
+    repositoryFile("action.yml"),
+    repositoryFile("package.json"),
   ]);
-  const pinnedRepoLens = `uses: rad1092/repolens@${releaseCommit} # v0.2.0`;
+  const packageJson = JSON.parse(packageRaw) as { version?: string };
+  const publicCopy = `${example}\n${readme}\n${landing}`;
 
-  for (const source of [example, readme, landing]) {
-    assert.match(source, new RegExp(pinnedRepoLens.replaceAll("/", "\\/")));
-    assert.match(source, /\.repolens\/baselines\/accepted\.json/);
-    assert.match(source, /fail-on: new-warning/);
-    assert.doesNotMatch(source, /REPLACE_WITH|uses: rad1092\/repolens@v0\.2\.0/);
-  }
+  assert.equal(packageJson.version, "0.3.0");
+  assert.match(readme, /repolens setup \./);
+  assert.match(readme, /repolens baseline check/);
+  assert.match(readme, /base branch/);
+  assert.match(readme, /SARIF/);
+  assert.match(readme, /not the compact\s+acceptance baseline/);
+  assert.match(example, /repolens setup \./);
+  assert.doesNotMatch(example, /^\s*(?:-\s*)?uses:/m);
 
-  assert.match(
-    example,
-    /repolens scan \. --format json --output \.repolens\/baselines\/accepted\.json --fail-on none/,
+  assert.match(landing, /Status NO NEW REGRESSIONS/);
+  assert.match(landing, /Accepted 2/);
+  assert.match(landing, /five outputs/i);
+  assert.match(landing, /SARIF/);
+  assert.match(landing, /separate compact baseline/);
+  assert.doesNotMatch(publicCopy, /\bScore\b|\bGrade\b|v0\.2\.0/);
+  assert.doesNotMatch(
+    publicCopy,
+    /uses:\s*rad1092\/repolens@(?:main|master|v\d)/,
   );
-  assert.match(
-    readme,
-    /repolens scan \.[\s\S]*--format json[\s\S]*--output \.repolens\/baselines\/accepted\.json[\s\S]*--fail-on none/,
-  );
-  assert.ok(
-    readme.indexOf("--output .repolens/baselines/accepted.json") <
-      readme.indexOf(pinnedRepoLens),
-  );
 
-  const actionReferences = [
-    ...example.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm),
-  ].map((match) => match[1] ?? "");
-  assert.ok(actionReferences.length >= 3);
-  for (const reference of actionReferences) {
-    assert.match(reference, /@[0-9a-f]{40}$/);
-  }
-
-  assert.match(landing, /Status POLICY PASSED/);
-  assert.match(landing, /New\s+0 critical/);
-  assert.match(landing, /Base\s+2026-07-28T09:00:00\.000Z/);
-  assert.match(landing, /Policy new-warning/);
-  assert.match(landing, /Score\s+94\/100/);
-  assert.doesNotMatch(landing, /Now\s+0 critical/);
-  assert.match(landing, /Grade A \(secondary heuristic\)/);
-  assert.doesNotMatch(landing, /accepted in baseline · no regression/);
+  assert.match(actionRaw, /using: node24/);
+  assert.match(actionRaw, /report-sarif:/);
+  assert.doesNotMatch(actionRaw, /^\s*score:/m);
 });

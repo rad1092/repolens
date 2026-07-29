@@ -1,31 +1,25 @@
 export type Severity =
-  | "pass"
   | "info"
   | "warning"
   | "critical"
   | "unknown";
 
 export type CheckId =
-  | "readme"
-  | "license"
-  | "ci"
   | "action-pinning"
-  | "branch-protection"
-  | "dependency-updates"
   | "lockfile"
-  | "package-scripts"
   | "outdated-dependencies"
-  | "todo-fixme"
-  | "large-files"
   | "tracked-env"
-  | "security-policy"
-  | "contributing-guide"
-  | "recent-commit"
-  | "latest-release"
-  | "open-issues"
-  | "open-pull-requests"
-  | "default-branch"
-  | "scan-coverage";
+  | "scan-coverage"
+  | "workflow-syntax"
+  | "workflow-trigger"
+  | "workflow-permissions"
+  | "workflow-script-wiring"
+  | "dependabot-config"
+  | "dependabot-coverage"
+  | "package-json"
+  | "lockfile-sync"
+  | "script-contract"
+  | "baseline-integrity";
 
 export type FailOn =
   | "none"
@@ -39,20 +33,35 @@ export interface Evidence {
   value: string | number | boolean | null;
 }
 
-export interface FindingComparisonEvidence {
-  count: number;
-  digest: string | null;
+export type FindingSource =
+  | "repository"
+  | "github"
+  | "npm"
+  | "repolens";
+
+export interface FindingLocation {
+  path: string;
+  line: number | null;
+  column: number | null;
+}
+
+export interface FindingIgnore {
+  reason: string;
+  expiresAt: string;
 }
 
 export interface Finding {
   id: CheckId;
+  ruleId?: string;
+  fingerprint?: string;
   title: string;
   severity: Severity;
   summary: string;
-  action: string | null;
-  deduction: number;
+  remediation?: string | null;
+  source?: FindingSource;
+  location?: FindingLocation | null;
+  ignored?: FindingIgnore | null;
   evidence: Evidence[];
-  comparisonEvidence?: FindingComparisonEvidence;
 }
 
 export interface RepositoryIdentity {
@@ -67,27 +76,6 @@ export interface RepositoryIdentity {
   } | null;
 }
 
-export interface CommitInfo {
-  sha: string;
-  subject: string;
-  committedAt: string;
-  ageDays: number;
-}
-
-export interface ReleaseInfo {
-  tag: string;
-  name: string;
-  publishedAt: string;
-  url: string;
-}
-
-export interface TodoMatch {
-  path: string;
-  line: number;
-  marker: "TODO" | "FIXME";
-  text: string;
-}
-
 export interface OutdatedDependency {
   name: string;
   declared: string;
@@ -100,7 +88,6 @@ export interface ScanCoverage {
   includedFiles: number;
   excludedFiles: number;
   excludes: string[];
-  todoTextFiles: number;
   dependencyPackages: {
     eligible: number;
     checked: number;
@@ -111,65 +98,27 @@ export interface ScanCoverage {
       | "not-applicable"
       | "unavailable";
   };
-  github: {
-    status: "complete" | "partial" | "offline" | "not-applicable";
-    available: string[];
-    unavailable: string[];
-  };
   unknownReasons: string[];
 }
 
 export interface Inventory {
-  isGitRepository: boolean;
   trackedFiles: string[];
-  readmeFiles: string[];
-  licenseFiles: string[];
   workflowFiles: string[];
-  lockfiles: string[];
-  packageJson: {
-    path: string;
-    scripts: Record<string, string>;
-    dependencyCount: number;
-  } | null;
-  todoMatches: TodoMatch[];
-  todoTotal: number;
-  largeFiles: Array<{ path: string; bytes: number }>;
   trackedEnvFiles: string[];
-  securityFiles: string[];
-  contributingFiles: string[];
-  dependencyUpdateFiles: string[];
-  unpinnedActions: Array<{ path: string; reference: string }>;
-  latestCommit: CommitInfo | null;
-  defaultBranch: string | null;
-  branchProtected: boolean | null;
-  dependabotSecurityUpdates: boolean | null;
-  latestRelease: ReleaseInfo | null;
-  openIssues: number | null;
-  openPullRequests: number | null;
   outdatedDependencies: OutdatedDependency[];
-  dependencyCheck: {
-    attempted: boolean;
-    eligible: number;
-    checked: number;
-    status: ScanCoverage["dependencyPackages"]["status"];
-    skippedReason: string | null;
-  };
   coverage: ScanCoverage;
 }
 
 export interface AuditOptions {
   now: Date;
-  staleDays: number;
-  largeFileBytes: number;
-  maxTodoMatches: number;
   offline: boolean;
   githubToken: string | null;
   excludes?: string[];
+  checks?: Record<string, RepoLensCheckConfig>;
   signal?: AbortSignal;
 }
 
 export interface FindingCounts {
-  pass: number;
   info: number;
   warning: number;
   critical: number;
@@ -178,6 +127,10 @@ export interface FindingCounts {
 
 export interface ComparisonChange {
   check: CheckId;
+  ruleId?: string;
+  fingerprint?: string;
+  path?: string | null;
+  line?: number | null;
   title: string;
   from: Severity | null;
   to: Severity | null;
@@ -192,6 +145,7 @@ export interface ReportComparison {
   } | null;
   new: Pick<FindingCounts, "critical" | "warning" | "unknown">;
   resolved: Pick<FindingCounts, "critical" | "warning" | "unknown">;
+  accepted?: Pick<FindingCounts, "critical" | "warning" | "unknown">;
   changes: ComparisonChange[];
 }
 
@@ -204,26 +158,30 @@ export interface PolicyResult {
 }
 
 export interface AuditReport {
-  schemaVersion: 2;
+  schemaVersion: 3;
   tool: {
     name: "RepoLens";
     version: string;
   };
   generatedAt: string;
   repository: Omit<RepositoryIdentity, "localPath">;
-  score: number;
-  grade: "A" | "B" | "C" | "D" | "F";
   counts: FindingCounts;
+  summary?: {
+    newRegressions: number;
+    acceptedDebt: number;
+    unknownCoverage: number;
+    ignored: number;
+  };
   comparison: ReportComparison;
   policy: PolicyResult;
   coverage: ScanCoverage;
-  findings: Finding[];
-  actions: Array<{
-    priority: number;
-    check: CheckId;
-    action: string;
-    reason: string;
+  configured?: Array<{
+    area: string;
+    evidence: string;
+    verification: "configured-not-executed";
   }>;
+  findings: Finding[];
+  ignoredFindings?: Finding[];
   limitations: string[];
 }
 
@@ -232,15 +190,33 @@ export interface RepoLensPolicyConfig {
   strict: boolean;
 }
 
-export interface RepoLensConfig {
-  schema: 1;
-  excludes: string[];
-  staleDays: number;
-  largeFileMB: number;
-  policy: RepoLensPolicyConfig;
+export interface RepoLensIgnoreConfig {
+  fingerprint: string;
+  reason: string;
+  expiresAt: string;
 }
 
-export type ReportFormat = "terminal" | "json" | "html" | "github";
+export interface RepoLensCheckConfig {
+  enabled?: boolean;
+  severity?: "info" | "warning" | "critical";
+  reason?: string;
+  expiresAt?: string;
+  ignore?: RepoLensIgnoreConfig[];
+}
+
+export interface RepoLensConfig {
+  schema: 1 | 2;
+  excludes: string[];
+  policy: RepoLensPolicyConfig;
+  checks?: Record<string, RepoLensCheckConfig>;
+}
+
+export type ReportFormat =
+  | "terminal"
+  | "json"
+  | "html"
+  | "github"
+  | "sarif";
 
 export interface ScanCliOptions {
   command: "scan" | "compare";
@@ -252,9 +228,6 @@ export interface ScanCliOptions {
   failOn: FailOn | null;
   strict: boolean | null;
   offline: boolean;
-  staleDays: number | null;
-  largeFileBytes: number | null;
-  maxTodoMatches: number;
   tokenEnv: string;
   noColor: boolean;
 }
@@ -265,4 +238,51 @@ export interface InitCliOptions {
   force: boolean;
 }
 
-export type CliOptions = ScanCliOptions | InitCliOptions;
+export interface SetupCliOptions {
+  command: "setup";
+  target: string;
+  force: boolean;
+  reason: string | null;
+  owner: string | null;
+  expiresAt: string | null;
+  actionSha: string | null;
+}
+
+export interface BaselineAcceptCliOptions {
+  command: "baseline-accept";
+  target: string;
+  output: string | null;
+  reason: string | null;
+  owner: string | null;
+  expiresAt: string | null;
+  fromV2: string | null;
+  force: boolean;
+}
+
+export interface BaselineCheckCliOptions {
+  command: "baseline-check";
+  target: string;
+  baselinePath: string | null;
+  configPath: string | null;
+  strict: boolean | null;
+  offline: boolean;
+}
+
+export interface DoctorCliOptions {
+  command: "doctor";
+  target: string;
+}
+
+export interface ExplainCliOptions {
+  command: "explain";
+  ruleId: string;
+}
+
+export type CliOptions =
+  | ScanCliOptions
+  | InitCliOptions
+  | SetupCliOptions
+  | BaselineAcceptCliOptions
+  | BaselineCheckCliOptions
+  | DoctorCliOptions
+  | ExplainCliOptions;
