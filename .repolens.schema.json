@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/rad1092/repolens/raw/main/.repolens.schema.json",
+  "$id": "https://raw.githubusercontent.com/rad1092/repolens/v0.4.0/.repolens.schema.json",
   "title": "RepoLens configuration",
   "type": "object",
   "additionalProperties": false,
@@ -8,6 +8,11 @@
     "schema"
   ],
   "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
     "schema": {
       "const": 2
     },

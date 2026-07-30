@@ -198,7 +198,7 @@
 
     .boundary {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 1rem;
       margin-top: 1.5rem;
     }
@@ -247,10 +247,10 @@
       <div>
         <p class="kicker">CLI + GitHub Action</p>
         <h1>Catch repository regressions before merge.</h1>
-        <p class="lede">RepoLens validates a focused Node and GitHub maintenance contract, separates reviewed existing debt from new findings, and puts file-and-line evidence on the pull request.</p>
+        <p class="lede">The current public release is v0.3.0. This site also documents the next v0.4.0 source, which must be verified from a source checkout until its release is published. RepoLens keeps repository contents out of this website.</p>
         <div class="hero-actions">
           <a href="#workflow">Set up the maintenance loop</a>
-          <a href="https://github.com/rad1092/repolens/releases/tag/v0.3.0">Install v0.3.0 ↗</a>
+          <a href="https://github.com/rad1092/repolens/releases/tag/v0.3.0">Install stable v0.3.0 ↗</a>
         </div>
       </div>
 
@@ -340,7 +340,7 @@ repolens baseline check . --offline
         </article>
         <article>
           <strong>HTML</strong>
-          <p>A standalone report for review and CI artifacts.</p>
+          <p>One offline file with policy, coverage, evidence, reviewed exceptions, and limitations.</p>
         </article>
         <article>
           <strong>GitHub</strong>
@@ -365,12 +365,16 @@ repolens baseline check . --offline
           <strong>Bounded scope</strong>
           <p>RepoLens covers the Node and GitHub maintenance contract. Dedicated scanners keep ownership of code and security analysis.</p>
         </div>
+        <div>
+          <strong>Website is documentation</strong>
+          <p>Scans run in the installed CLI or pinned Action. Repository contents are never uploaded here.</p>
+        </div>
       </div>
     </section>
   </main>
 
   <footer>
-    <span>RepoLens v0.3.0 · MIT · Node.js 20.11+</span>
+    <span>Next-release source v0.4.0 · Public release v0.3.0 · MIT · Node.js 20.11+</span>
     <div>
       <a href="https://github.com/rad1092/repolens#start-the-gate">Setup guide ↗</a>
       <a href="https://github.com/rad1092/repolens#readme">Full documentation ↗</a>

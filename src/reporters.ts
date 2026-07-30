@@ -1,5 +1,12 @@
 import { regressionFindings } from "./sarif.js";
+import {
+  acceptedFindings,
+  locationLabel,
+  reportStatus,
+} from "./report-view.js";
 import type { AuditReport, Finding, Severity } from "./types.js";
+
+export { renderHtml } from "./report-html.js";
 
 const severityLabel: Record<Severity, string> = {
   info: "INFO",
@@ -20,29 +27,6 @@ function terminalSeverity(enabled: boolean, severity: Severity): string {
     unknown: 35,
   };
   return ansi(enabled, colors[severity], severityLabel[severity]);
-}
-
-function locationLabel(finding: Finding): string {
-  const path = finding.location?.path;
-  if (!path) return "repository";
-  return finding.location?.line
-    ? `${path}:${finding.location.line}`
-    : path;
-}
-
-function acceptedFindings(report: AuditReport): Finding[] {
-  if (!report.comparison.baseline) return [];
-  const regressions = new Set(
-    regressionFindings(report).map((finding) => finding.fingerprint),
-  );
-  return report.findings.filter(
-    (finding) =>
-      !finding.ignored &&
-      !regressions.has(finding.fingerprint) &&
-      (finding.severity === "critical" ||
-        finding.severity === "warning" ||
-        finding.severity === "unknown"),
-  );
 }
 
 function terminalFinding(finding: Finding, color: boolean): string[] {
@@ -67,13 +51,7 @@ export function renderTerminal(
   const observations = report.findings.filter(
     (finding) => finding.severity === "info" && !finding.ignored,
   );
-  const status = report.policy.operationalError
-    ? "INCOMPLETE"
-    : report.policy.passed
-      ? report.comparison.baseline
-        ? "NO NEW REGRESSIONS"
-        : "POLICY PASSED"
-      : "REGRESSION BLOCKED";
+  const status = reportStatus(report);
   const lines = [
     "",
     ansi(options.color, 1, `RepoLens ${report.tool.version}`),
@@ -173,11 +151,7 @@ function markdownTable(findings: Finding[]): string[] {
 export function renderGitHubMarkdown(report: AuditReport): string {
   const regressions = regressionFindings(report);
   const accepted = acceptedFindings(report);
-  const status = report.policy.operationalError
-    ? "INCOMPLETE"
-    : report.policy.passed
-      ? "NO NEW REGRESSIONS"
-      : "REGRESSION BLOCKED";
+  const status = reportStatus(report);
   const lines = [
     `## RepoLens · ${status}`,
     "",
@@ -211,58 +185,4 @@ export function renderGitHubMarkdown(report: AuditReport): string {
     "",
   );
   return lines.join("\n");
-}
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function htmlFindings(findings: Finding[]): string {
-  if (findings.length === 0) return "<p>None.</p>";
-  return findings
-    .map(
-      (finding) => `<article class="${escapeHtml(finding.severity)}">
-  <p><strong>${escapeHtml(finding.ruleId ?? finding.id)}</strong> <code>${escapeHtml(locationLabel(finding))}</code></p>
-  <p>${escapeHtml(finding.summary)}</p>
-  ${finding.remediation ? `<p><b>Fix</b> ${escapeHtml(finding.remediation)}</p>` : ""}
-</article>`,
-    )
-    .join("");
-}
-
-export function renderHtml(report: AuditReport): string {
-  const regressions = regressionFindings(report);
-  const accepted = acceptedFindings(report);
-  const title = `${report.repository.name} · RepoLens`;
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-  <title>${escapeHtml(title)}</title>
-  <style>
-    :root{color-scheme:light dark;font:16px/1.5 system-ui,sans-serif}body{max-width:920px;margin:0 auto;padding:40px 20px}header,article{border:1px solid #8886;border-radius:12px;padding:18px;margin:14px 0}h1,h2,p{margin:0 0 10px}.critical{border-left:6px solid #d1242f}.warning{border-left:6px solid #bf8700}.unknown{border-left:6px solid #8250df}code{overflow-wrap:anywhere}.counts{display:flex;gap:20px;flex-wrap:wrap}
-  </style>
-</head>
-<body>
-  <header>
-    <p>RepoLens ${escapeHtml(report.tool.version)}</p>
-    <h1>${escapeHtml(report.repository.name)}</h1>
-    <p class="counts"><b>${regressions.length} new</b><span>${accepted.length} accepted</span><span>${report.summary?.unknownCoverage ?? report.counts.unknown} unknown</span><span>${report.ignoredFindings?.length ?? 0} ignored</span></p>
-  </header>
-  <main>
-    <h2>New regressions</h2>
-    ${htmlFindings(regressions)}
-    ${accepted.length > 0 ? `<h2>Accepted debt</h2>${htmlFindings(accepted)}` : ""}
-  </main>
-  <footer><p>Configured commands were not executed. Generated ${escapeHtml(report.generatedAt)}.</p></footer>
-</body>
-</html>
-`;
 }

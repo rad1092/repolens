@@ -13,9 +13,17 @@ or dependency-update tools.
 
 Product guide: [https://repolens.whago.net/](https://repolens.whago.net/)
 
+The website is documentation and a download route. Repository inspection runs
+only in the installed CLI or the pinned GitHub Action; RepoLens does not upload
+a repository to the website.
+
 ## Install
 
 Node.js 20.11 or newer is required.
+
+### Current public release: v0.3.0
+
+The current public release is v0.3.0:
 
 ```sh
 npm install --global \
@@ -23,16 +31,27 @@ npm install --global \
 repolens --version
 ```
 
-From a source checkout:
+### Next release source: v0.4.0
+
+This repository currently contains the next v0.4.0 source. It has not been
+published as a GitHub Release. From a reviewed source checkout, run the complete
+gate before linking the development build:
 
 ```sh
 npm ci
-npm run build
+npm run check
 npm link
+repolens --version
 ```
 
 The unscoped `repolens` name on npm belongs to another project. This package is
 named `@rad1092/repolens`.
+
+The scoped package is intended for GitHub Release distribution rather than the
+npm registry. The tag workflow refuses to publish unless repository release
+immutability is already enabled, then publishes the package with its SHA-256
+digest. Download the tarball, compare that digest, and install the verified
+local file when your environment requires an explicit supply-chain check.
 
 ## Start the gate
 
@@ -78,7 +97,7 @@ regressions.
 
 ## What it validates
 
-RepoLens v0.3 deliberately covers a small contract:
+RepoLens v0.4 deliberately covers a small contract:
 
 | Rule area | Validation |
 | --- | --- |
@@ -144,10 +163,12 @@ The v3 baseline records the source report hash as migration provenance.
 
 ## Configuration
 
-`repolens setup` and `repolens init` write schema 2:
+The next-release v0.4 source writes schema 2. Its versioned schema URL becomes
+available when the v0.4.0 tag is published:
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/rad1092/repolens/v0.4.0/.repolens.schema.json",
   "schema": 2,
   "excludes": [
     "**/.repolens/**",
@@ -206,6 +227,11 @@ GitHub-flavored Markdown, and SARIF:
 The JSON report is machine-readable audit output. It is not the compact
 acceptance baseline stored under `.repolens/baselines/`.
 
+The HTML report is one self-contained offline file. It includes the policy
+result, detection and npm-metadata coverage, finding evidence, reviewed
+exceptions, configured-but-not-executed commands, and declared limitations. It
+contains no scripts, remote fonts, analytics, or network requests.
+
 ```sh
 repolens compare . \
   --baseline .repolens/baselines/accepted.json \
@@ -230,3 +256,38 @@ repolens scan owner/private-repository \
 
 RepoLens rejects raw `--token` arguments. Credentials are not written to the
 checkout, configuration, or report.
+
+## Release artifacts
+
+The tag workflow can publish three artifacts:
+
+- `rad1092-repolens-<version>.tgz` — installable CLI package
+- `SHA256SUMS` — digest for the package bytes
+- `manifest.json` — package name, version, size, integrity, runtime, and digest
+
+Publication is fail-closed. Before the release job can run:
+
+- Node 20.11, 22, and 24 must each pass the CLI, Action, package, and report gate.
+- The tag commit must already belong to the default branch history.
+- Repository release immutability must be enabled outside the workflow.
+- `IMMUTABLE_RELEASES_READ_TOKEN` must contain a fine-grained token with only
+  the repository `Administration: read` permission needed to inspect that
+  setting.
+
+The workflow only calls GitHub's read endpoint for the immutability setting. It
+never enables or disables the setting. If the token is absent, the setting
+cannot be read, or `enabled` is not `true`, no release is created. GitHub only
+makes releases created after that setting is enabled immutable; existing
+releases are not changed retroactively.
+
+After those checks, the release build creates the package twice and requires
+identical SHA-256 digests. It installs the tarball into an empty prefix and runs
+the packaged CLI through offline HTML, JSON, and SARIF reports plus exit codes
+`0`, `1`, and `2`. The workflow signs SLSA build provenance with GitHub artifact
+attestations and verifies that GitHub reports the published release as
+immutable. After v0.4.0 is published, verify its downloaded package with:
+
+```sh
+gh attestation verify rad1092-repolens-0.4.0.tgz \
+  --repo rad1092/repolens
+```

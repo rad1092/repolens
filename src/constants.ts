@@ -1,5 +1,5 @@
 export const TOOL_NAME = "RepoLens" as const;
-export const TOOL_VERSION = "0.3.0";
+export const TOOL_VERSION = "0.4.0";
 
 export const DEFAULT_CONFIG_FILE = ".repolens.json";
 export const DEFAULT_EXCLUDES = [

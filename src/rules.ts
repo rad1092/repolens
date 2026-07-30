@@ -49,9 +49,9 @@ const definitions = [
     defaultSeverity: "warning",
     source: "repository",
     explanation:
-      "Implicit or broad GITHUB_TOKEN permissions make a compromised workflow more damaging.",
+      "Implicit or broad GITHUB_TOKEN permissions make a compromised workflow more damaging. Write scopes are especially unsafe in pull-request and reusable workflow contexts.",
     remediation:
-      "Declare read-only top-level permissions and grant any required write scope only on the specific job.",
+      "Declare read-only top-level permissions. Grant a required write scope only on the specific job in a trusted push, release, schedule, or manual workflow.",
   },
   {
     id: "workflow/action-pin",

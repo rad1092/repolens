@@ -9515,7 +9515,7 @@ var import_node_path2 = require("node:path");
 
 // src/constants.ts
 var TOOL_NAME = "RepoLens";
-var TOOL_VERSION = "0.3.0";
+var TOOL_VERSION = "0.4.0";
 var DEFAULT_CONFIG_FILE = ".repolens.json";
 var DEFAULT_EXCLUDES = [
   "**/.repolens/**",
@@ -9565,8 +9565,8 @@ var definitions = [
     title: "Workflow token permissions",
     defaultSeverity: "warning",
     source: "repository",
-    explanation: "Implicit or broad GITHUB_TOKEN permissions make a compromised workflow more damaging.",
-    remediation: "Declare read-only top-level permissions and grant any required write scope only on the specific job."
+    explanation: "Implicit or broad GITHUB_TOKEN permissions make a compromised workflow more damaging. Write scopes are especially unsafe in pull-request and reusable workflow contexts.",
+    remediation: "Declare read-only top-level permissions. Grant a required write scope only on the specific job in a trusted push, release, schedule, or manual workflow."
   },
   {
     id: "workflow/action-pin",
@@ -9782,6 +9782,7 @@ var DEFAULT_POLICY = {
   failOn: "new-warning",
   strict: false
 };
+var CONFIG_SCHEMA_URL = `https://raw.githubusercontent.com/rad1092/repolens/v${TOOL_VERSION}/.repolens.schema.json`;
 var DEFAULT_CONFIG = {
   schema: 2,
   excludes: [...DEFAULT_EXCLUDES],
@@ -9944,14 +9945,18 @@ function parseConfig(value) {
   assertKnownKeys(
     value,
     value.schema === 1 ? /* @__PURE__ */ new Set([
+      "$schema",
       "schema",
       "excludes",
       "staleDays",
       "largeFileMB",
       "policy"
-    ]) : /* @__PURE__ */ new Set(["schema", "excludes", "policy", "checks"]),
+    ]) : /* @__PURE__ */ new Set(["$schema", "schema", "excludes", "policy", "checks"]),
     "RepoLens config"
   );
+  if (value.$schema !== void 0 && (typeof value.$schema !== "string" || !/^https:\/\/\S+$/.test(value.$schema))) {
+    throw new Error("$schema must be an HTTPS URL when provided.");
+  }
   let excludes = [...DEFAULT_CONFIG.excludes];
   if (value.excludes !== void 0) {
     if (!Array.isArray(value.excludes) || !value.excludes.every(
@@ -10241,13 +10246,12 @@ function renderSarif(report, sourceRoot = null) {
 `;
 }
 
-// src/reporters.ts
-var severityLabel = {
-  info: "INFO",
-  warning: "WARN",
-  critical: "CRITICAL",
-  unknown: "UNKNOWN"
-};
+// src/report-view.ts
+function reportStatus(report) {
+  if (report.policy.operationalError) return "INCOMPLETE";
+  if (!report.policy.passed) return "REGRESSION BLOCKED";
+  return report.comparison.baseline ? "NO NEW REGRESSIONS" : "POLICY PASSED";
+}
 function locationLabel(finding) {
   const path2 = finding.location?.path;
   if (!path2) return "repository";
@@ -10262,6 +10266,348 @@ function acceptedFindings(report) {
     (finding) => !finding.ignored && !regressions.has(finding.fingerprint) && (finding.severity === "critical" || finding.severity === "warning" || finding.severity === "unknown")
   );
 }
+
+// src/report-html.ts
+var severityLabel = {
+  info: "INFO",
+  warning: "WARNING",
+  critical: "CRITICAL",
+  unknown: "UNKNOWN"
+};
+function escapeHtml(value) {
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+function statusOf(report) {
+  const status = reportStatus(report);
+  return {
+    label: status === "INCOMPLETE" ? "INSPECTION INCOMPLETE" : status,
+    tone: status === "INCOMPLETE" ? "incomplete" : status === "REGRESSION BLOCKED" ? "blocked" : "passed"
+  };
+}
+function evidenceTable(evidence) {
+  if (evidence.length === 0) return "";
+  const rows = evidence.map(
+    (item) => `<tr>
+  <th scope="row">${escapeHtml(item.label)}</th>
+  <td><code>${escapeHtml(item.value)}</code></td>
+</tr>`
+  ).join("");
+  return `<details>
+  <summary>Evidence (${evidence.length})</summary>
+  <div class="table-wrap">
+    <table><tbody>${rows}</tbody></table>
+  </div>
+</details>`;
+}
+function findingCards(findings, empty) {
+  if (findings.length === 0) {
+    return `<p class="empty">${escapeHtml(empty)}</p>`;
+  }
+  return findings.map(
+    (finding) => `<article class="finding ${escapeHtml(finding.severity)}">
+  <div class="finding-heading">
+    <span class="severity">${severityLabel[finding.severity]}</span>
+    <code>${escapeHtml(finding.ruleId ?? finding.id)}</code>
+    <code class="location">${escapeHtml(locationLabel(finding))}</code>
+  </div>
+  <h3>${escapeHtml(finding.title)}</h3>
+  <p>${escapeHtml(finding.summary)}</p>
+  ${finding.remediation ? `<p class="remediation"><strong>Fix</strong> ${escapeHtml(finding.remediation)}</p>` : ""}
+  ${finding.fingerprint ? `<p class="fingerprint">Finding ID <code>${escapeHtml(finding.fingerprint)}</code></p>` : ""}
+  ${evidenceTable(finding.evidence)}
+</article>`
+  ).join("");
+}
+function ignoredFindings(report) {
+  const findings = report.ignoredFindings ?? [];
+  if (findings.length === 0) return "";
+  const rows = findings.map(
+    (finding) => `<tr>
+  <td><code>${escapeHtml(finding.ruleId ?? finding.id)}</code></td>
+  <td><code>${escapeHtml(locationLabel(finding))}</code></td>
+  <td>${escapeHtml(finding.ignored?.reason)}</td>
+  <td><time>${escapeHtml(finding.ignored?.expiresAt)}</time></td>
+</tr>`
+  ).join("");
+  return `<section aria-labelledby="ignored-heading">
+  <h2 id="ignored-heading">Reviewed ignores</h2>
+  <p class="section-note">Temporary exceptions remain visible until they expire.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Rule</th><th>Location</th><th>Reason</th><th>Expires</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+</section>`;
+}
+function configuredEvidence(report) {
+  if (!report.configured || report.configured.length === 0) return "";
+  const rows = report.configured.map(
+    (item) => `<tr>
+  <td>${escapeHtml(item.area)}</td>
+  <td><code>${escapeHtml(item.evidence)}</code></td>
+  <td>Not executed</td>
+</tr>`
+  ).join("");
+  return `<section aria-labelledby="configured-heading">
+  <h2 id="configured-heading">Configured evidence</h2>
+  <p class="section-note">RepoLens verifies configuration and command reachability. It does not execute audited repository scripts.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Area</th><th>Evidence</th><th>Verification</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+</section>`;
+}
+function limitations(report) {
+  if (report.limitations.length === 0) return "";
+  return `<section aria-labelledby="limitations-heading">
+  <h2 id="limitations-heading">Scope and limitations</h2>
+  <ul>${report.limitations.map((limitation) => `<li>${escapeHtml(limitation)}</li>`).join("")}</ul>
+</section>`;
+}
+function renderHtml(report) {
+  const regressions = regressionFindings(report);
+  const accepted = acceptedFindings(report);
+  const observations = report.findings.filter(
+    (finding) => finding.severity === "info" && !finding.ignored
+  );
+  const status = statusOf(report);
+  const title = `${report.repository.name} \xB7 RepoLens`;
+  const repository = report.repository.github?.url ?? report.repository.input;
+  const baseline = report.comparison.baseline;
+  const policyReasons = report.policy.reasons.length === 0 ? "" : `<ul class="policy-reasons">${report.policy.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <meta name="generator" content="RepoLens ${escapeHtml(report.tool.version)}">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --canvas: #f6f8fa;
+      --surface: #fff;
+      --surface-alt: #f0f3f6;
+      --ink: #1f2328;
+      --muted: #59636e;
+      --line: #d0d7de;
+      --green: #1a7f37;
+      --red: #cf222e;
+      --amber: #9a6700;
+      --purple: #8250df;
+      --blue: #0969da;
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 36px 22px 56px;
+      color: var(--ink);
+      background: var(--canvas);
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: .2rem; font-size: clamp(2rem, 5vw, 3.4rem); letter-spacing: -.045em; }
+    h2 { margin-bottom: .35rem; font-size: 1.45rem; letter-spacing: -.02em; }
+    h3 { margin-bottom: .45rem; font-size: 1.05rem; }
+    code {
+      overflow-wrap: anywhere;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    header.hero, section {
+      margin-bottom: 20px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+    .eyebrow, .section-note, .meta, .fingerprint { color: var(--muted); }
+    .eyebrow {
+      margin-bottom: .35rem;
+      font-size: .76rem;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .status {
+      display: inline-flex;
+      margin: .7rem 0 1.2rem;
+      padding: .35rem .62rem;
+      border-radius: 999px;
+      color: #fff;
+      font-size: .76rem;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+    .status.passed { background: var(--green); }
+    .status.blocked { background: var(--red); }
+    .status.incomplete { background: var(--purple); }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-alt);
+    }
+    .metric strong { display: block; font-size: 1.55rem; }
+    .metric span { color: var(--muted); font-size: .8rem; }
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 24px;
+      margin: 18px 0 0;
+    }
+    .facts div {
+      display: grid;
+      grid-template-columns: 9rem 1fr;
+      padding: .5rem 0;
+      border-top: 1px solid var(--line);
+    }
+    .facts dt { color: var(--muted); }
+    .facts dd { margin: 0; overflow-wrap: anywhere; }
+    .policy-reasons { margin: 14px 0 0; padding-left: 1.2rem; }
+    .finding {
+      margin-top: 12px;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-left-width: 5px;
+      border-radius: 10px;
+      background: var(--surface-alt);
+    }
+    .finding.critical { border-left-color: var(--red); }
+    .finding.warning { border-left-color: var(--amber); }
+    .finding.unknown { border-left-color: var(--purple); }
+    .finding.info { border-left-color: var(--blue); }
+    .finding-heading {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .45rem .7rem;
+      align-items: center;
+      margin-bottom: .7rem;
+    }
+    .severity { font-size: .68rem; font-weight: 850; letter-spacing: .06em; }
+    .location { margin-left: auto; color: var(--muted); }
+    .remediation { padding-top: .8rem; border-top: 1px solid var(--line); }
+    .fingerprint { margin-bottom: .65rem; font-size: .75rem; }
+    .empty {
+      margin: 1rem 0 0;
+      padding: 1rem;
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      color: var(--muted);
+    }
+    details { margin-top: .7rem; }
+    summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; margin-top: .75rem; border-collapse: collapse; font-size: .85rem; }
+    th, td {
+      padding: .65rem .7rem;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: var(--surface-alt); }
+    ul { margin-bottom: 0; padding-left: 1.3rem; }
+    footer { padding: 12px 2px; color: var(--muted); font-size: .78rem; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas: #0d1117;
+        --surface: #161b22;
+        --surface-alt: #0d1117;
+        --ink: #e6edf3;
+        --muted: #9198a1;
+        --line: #30363d;
+        --green: #238636;
+        --red: #da3633;
+        --amber: #d29922;
+        --purple: #8957e5;
+        --blue: #2f81f7;
+      }
+    }
+    @media (max-width: 700px) {
+      body { padding: 18px 12px 40px; }
+      .metrics, .facts { grid-template-columns: 1fr 1fr; }
+      .facts div { display: block; }
+      .facts dd { margin-top: .15rem; }
+      .location { width: 100%; margin-left: 0; }
+    }
+    @media print {
+      :root { color-scheme: light; }
+      body { max-width: none; padding: 0; background: #fff; }
+      header.hero, section { break-inside: avoid; border-color: #bbb; }
+      .finding { break-inside: avoid; }
+      details, details > * { display: block; }
+      .status {
+        border: 1px solid currentColor;
+        color: var(--ink);
+        background: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <p class="eyebrow">RepoLens ${escapeHtml(report.tool.version)} \xB7 offline report</p>
+    <h1>${escapeHtml(report.repository.name)}</h1>
+    <p class="meta">${escapeHtml(repository)}</p>
+    <p class="status ${status.tone}">STATUS ${status.label}</p>
+    <div class="metrics" aria-label="Finding summary">
+      <div class="metric"><strong>${regressions.length}</strong><span>New regressions</span></div>
+      <div class="metric"><strong>${accepted.length}</strong><span>Accepted debt</span></div>
+      <div class="metric"><strong>${report.summary?.unknownCoverage ?? report.counts.unknown}</strong><span>Unknown coverage</span></div>
+      <div class="metric"><strong>${report.ignoredFindings?.length ?? 0}</strong><span>Reviewed ignores</span></div>
+    </div>
+    <dl class="facts">
+      <div><dt>Policy</dt><dd><code>${escapeHtml(report.policy.failOn)}</code>${report.policy.strict ? " \xB7 strict" : ""}</dd></div>
+      <div><dt>Files</dt><dd>${report.coverage.includedFiles}/${report.coverage.trackedFiles} included \xB7 ${report.coverage.excludedFiles} excluded</dd></div>
+      <div><dt>npm metadata</dt><dd>${escapeHtml(report.coverage.dependencyPackages.status)} \xB7 ${report.coverage.dependencyPackages.checked}/${report.coverage.dependencyPackages.eligible} checked</dd></div>
+      <div><dt>Baseline</dt><dd>${baseline ? `${escapeHtml(baseline.source)} \xB7 ${escapeHtml(baseline.generatedAt)}` : "None"}</dd></div>
+      <div><dt>Generated</dt><dd><time>${escapeHtml(report.generatedAt)}</time></dd></div>
+      <div><dt>Report schema</dt><dd>${report.schemaVersion}</dd></div>
+    </dl>
+    ${policyReasons}
+  </header>
+  <main>
+    <section aria-labelledby="new-heading">
+      <h2 id="new-heading">New regressions</h2>
+      <p class="section-note">Only new or worsened findings are gate candidates when a reviewed baseline is present.</p>
+      ${findingCards(regressions, "No new regressions.")}
+    </section>
+    ${accepted.length > 0 ? `<section aria-labelledby="accepted-heading">
+      <h2 id="accepted-heading">Accepted debt</h2>
+      <p class="section-note">These findings were present in the reviewed baseline and remain visible without repeated annotations.</p>
+      ${findingCards(accepted, "No accepted debt.")}
+    </section>` : ""}
+    ${observations.length > 0 ? `<section aria-labelledby="observations-heading">
+      <h2 id="observations-heading">Updater observations</h2>
+      <p class="section-note">Update availability is context for a maintainer, not vulnerability evidence.</p>
+      ${findingCards(observations, "No updater observations.")}
+    </section>` : ""}
+    ${ignoredFindings(report)}
+    ${configuredEvidence(report)}
+    ${limitations(report)}
+  </main>
+  <footer>Self-contained report. No scripts, remote fonts, analytics, or network requests. Generated by RepoLens ${escapeHtml(report.tool.version)}.</footer>
+</body>
+</html>
+`;
+}
+
+// src/reporters.ts
+var severityLabel2 = {
+  info: "INFO",
+  warning: "WARN",
+  critical: "CRITICAL",
+  unknown: "UNKNOWN"
+};
 function renderJson(report) {
   return `${JSON.stringify(report, null, 2)}
 `;
@@ -10277,7 +10623,7 @@ function markdownTable(findings) {
   ];
   for (const finding of findings) {
     lines.push(
-      `| ${severityLabel[finding.severity]} | \`${escapeMarkdown(finding.ruleId ?? finding.id)}\` | \`${escapeMarkdown(locationLabel(finding))}\` | ${escapeMarkdown(finding.summary)} |`
+      `| ${severityLabel2[finding.severity]} | \`${escapeMarkdown(finding.ruleId ?? finding.id)}\` | \`${escapeMarkdown(locationLabel(finding))}\` | ${escapeMarkdown(finding.summary)} |`
     );
   }
   return [...lines, ""];
@@ -10285,7 +10631,7 @@ function markdownTable(findings) {
 function renderGitHubMarkdown(report) {
   const regressions = regressionFindings(report);
   const accepted = acceptedFindings(report);
-  const status = report.policy.operationalError ? "INCOMPLETE" : report.policy.passed ? "NO NEW REGRESSIONS" : "REGRESSION BLOCKED";
+  const status = reportStatus(report);
   const lines = [
     `## RepoLens \xB7 ${status}`,
     "",
@@ -10319,50 +10665,6 @@ function renderGitHubMarkdown(report) {
     ""
   );
   return lines.join("\n");
-}
-function escapeHtml(value) {
-  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
-function htmlFindings(findings) {
-  if (findings.length === 0) return "<p>None.</p>";
-  return findings.map(
-    (finding) => `<article class="${escapeHtml(finding.severity)}">
-  <p><strong>${escapeHtml(finding.ruleId ?? finding.id)}</strong> <code>${escapeHtml(locationLabel(finding))}</code></p>
-  <p>${escapeHtml(finding.summary)}</p>
-  ${finding.remediation ? `<p><b>Fix</b> ${escapeHtml(finding.remediation)}</p>` : ""}
-</article>`
-  ).join("");
-}
-function renderHtml(report) {
-  const regressions = regressionFindings(report);
-  const accepted = acceptedFindings(report);
-  const title = `${report.repository.name} \xB7 RepoLens`;
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
-  <title>${escapeHtml(title)}</title>
-  <style>
-    :root{color-scheme:light dark;font:16px/1.5 system-ui,sans-serif}body{max-width:920px;margin:0 auto;padding:40px 20px}header,article{border:1px solid #8886;border-radius:12px;padding:18px;margin:14px 0}h1,h2,p{margin:0 0 10px}.critical{border-left:6px solid #d1242f}.warning{border-left:6px solid #bf8700}.unknown{border-left:6px solid #8250df}code{overflow-wrap:anywhere}.counts{display:flex;gap:20px;flex-wrap:wrap}
-  </style>
-</head>
-<body>
-  <header>
-    <p>RepoLens ${escapeHtml(report.tool.version)}</p>
-    <h1>${escapeHtml(report.repository.name)}</h1>
-    <p class="counts"><b>${regressions.length} new</b><span>${accepted.length} accepted</span><span>${report.summary?.unknownCoverage ?? report.counts.unknown} unknown</span><span>${report.ignoredFindings?.length ?? 0} ignored</span></p>
-  </header>
-  <main>
-    <h2>New regressions</h2>
-    ${htmlFindings(regressions)}
-    ${accepted.length > 0 ? `<h2>Accepted debt</h2>${htmlFindings(accepted)}` : ""}
-  </main>
-  <footer><p>Configured commands were not executed. Generated ${escapeHtml(report.generatedAt)}.</p></footer>
-</body>
-</html>
-`;
 }
 
 // src/runner.ts
@@ -12522,21 +12824,10 @@ async function scanRepository(identity, options) {
   };
 }
 
-// src/validators.ts
+// src/validation/shared.ts
 var import_promises4 = require("node:fs/promises");
 var import_node_path5 = require("node:path");
 var import_yaml = __toESM(require_dist(), 1);
-var REQUIRED_NODE_SCRIPTS = ["test", "lint", "build"];
-var REPOSITORY_PERMISSION_VALUES = /* @__PURE__ */ new Set(["read", "write", "none"]);
-var SAFE_UPDATE_INTERVALS = /* @__PURE__ */ new Set([
-  "daily",
-  "weekly",
-  "monthly",
-  "quarterly",
-  "semiannually",
-  "yearly",
-  "cron"
-]);
 function isObject2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -12576,81 +12867,156 @@ function parseYamlObject(path2, raw) {
     errors: [`${path2} must contain a YAML mapping at its root.`]
   };
 }
-function hasPullRequestTrigger(value) {
-  if (typeof value === "string") return value === "pull_request";
-  if (Array.isArray(value)) return value.includes("pull_request");
-  return isObject2(value) && Object.hasOwn(value, "pull_request");
+
+// src/validation/dependabot.ts
+var SAFE_UPDATE_INTERVALS = /* @__PURE__ */ new Set([
+  "daily",
+  "weekly",
+  "monthly",
+  "quarterly",
+  "semiannually",
+  "yearly",
+  "cron"
+]);
+function validDependabotEntry(entry, ecosystem) {
+  if (!isObject2(entry) || entry["package-ecosystem"] !== ecosystem) {
+    return false;
+  }
+  if (dependabotEntryProblems(entry, 0).length > 0) return false;
+  const directory = entry.directory;
+  const directories = entry.directories;
+  const coversRoot = directory === "/" || Array.isArray(directories) && directories.includes("/");
+  if (!coversRoot || !isObject2(entry.schedule)) return false;
+  return typeof entry.schedule.interval === "string" && SAFE_UPDATE_INTERVALS.has(entry.schedule.interval) && (entry.schedule.interval !== "cron" || typeof entry.schedule.cronjob === "string" && entry.schedule.cronjob.trim().length > 0);
 }
-function permissionProblems(value) {
-  if (value === void 0) {
-    return ["top-level permissions are implicit"];
-  }
-  if (typeof value === "string") {
-    if (value === "read-all") return [];
-    if (value === "write-all") return ["permissions is write-all"];
-    return [
-      `permissions has unsupported value ${JSON.stringify(value)}`
-    ];
-  }
-  if (!isObject2(value)) return ["permissions is not a mapping"];
+function dependabotEntryProblems(entry, index) {
+  const prefix = `updates[${index}]`;
+  if (!isObject2(entry)) return [`${prefix} must be a mapping`];
   const problems = [];
-  for (const [scope, permission] of Object.entries(value)) {
-    if (typeof permission !== "string" || !REPOSITORY_PERMISSION_VALUES.has(permission)) {
-      problems.push(
-        `${scope}: unsupported permission ${JSON.stringify(permission)}`
+  if (typeof entry["package-ecosystem"] !== "string" || entry["package-ecosystem"].trim().length === 0) {
+    problems.push(`${prefix}.package-ecosystem is required`);
+  }
+  const definesDirectory = Object.hasOwn(entry, "directory");
+  const definesDirectories = Object.hasOwn(entry, "directories");
+  const hasDirectory = typeof entry.directory === "string" && entry.directory.trim().length > 0;
+  const hasDirectories = Array.isArray(entry.directories) && entry.directories.length > 0 && entry.directories.every(
+    (directory) => typeof directory === "string" && directory.trim().length > 0
+  );
+  if (definesDirectory && definesDirectories) {
+    problems.push(
+      `${prefix}.directory and ${prefix}.directories are mutually exclusive`
+    );
+  } else if (!definesDirectory && !definesDirectories) {
+    problems.push(
+      `${prefix} requires exactly one of directory or directories`
+    );
+  } else if (definesDirectory && !hasDirectory) {
+    problems.push(`${prefix}.directory must be a non-empty string`);
+  } else if (definesDirectories && !hasDirectories) {
+    problems.push(
+      `${prefix}.directories must be a non-empty array of non-empty strings`
+    );
+  }
+  if (!isObject2(entry.schedule)) {
+    problems.push(`${prefix}.schedule must be a mapping`);
+  } else if (typeof entry.schedule.interval !== "string" || !SAFE_UPDATE_INTERVALS.has(entry.schedule.interval)) {
+    problems.push(`${prefix}.schedule.interval is unsupported`);
+  } else if (entry.schedule.interval === "cron" && (typeof entry.schedule.cronjob !== "string" || entry.schedule.cronjob.trim().length === 0)) {
+    problems.push(
+      `${prefix}.schedule.cronjob is required for a cron interval`
+    );
+  }
+  return problems;
+}
+async function validateDependabot(root, files, inventory, hasManifest) {
+  const findings = [];
+  const configured = [];
+  const dependabotPath = files.has(".github/dependabot.yml") ? ".github/dependabot.yml" : files.has(".github/dependabot.yaml") ? ".github/dependabot.yaml" : null;
+  const dependabotRaw = dependabotPath ? await readTracked(root, files, dependabotPath) : null;
+  let dependabotUpdates = [];
+  if (dependabotPath && dependabotRaw !== null) {
+    const parsed = parseYamlObject(dependabotPath, dependabotRaw);
+    if (!parsed.value || parsed.value.version !== 2 || !Array.isArray(parsed.value.updates)) {
+      findings.push(
+        createRuleFinding({
+          ruleId: "dependabot/syntax",
+          stableIdentity: dependabotPath,
+          summary: !parsed.value ? `${dependabotPath} could not be parsed: ${parsed.errors[0]}` : `${dependabotPath} must use version 2 and contain an updates array.`,
+          location: location(dependabotPath)
+        })
       );
-    } else if (permission === "write") {
-      problems.push(`${scope}: ${permission}`);
-    }
-  }
-  return problems;
-}
-function workflowPermissionProblems(value) {
-  const problems = permissionProblems(value.permissions);
-  if (!isObject2(value.jobs)) return problems;
-  for (const [jobName, job] of Object.entries(value.jobs)) {
-    if (!isObject2(job) || job.permissions === void 0) continue;
-    for (const problem of permissionProblems(job.permissions)) {
-      problems.push(`${jobName}: ${problem}`);
-    }
-  }
-  return problems;
-}
-function workflowRuns(value) {
-  if (!isObject2(value.jobs)) return [];
-  const runs = [];
-  for (const job of Object.values(value.jobs)) {
-    if (!isObject2(job) || !Array.isArray(job.steps)) continue;
-    for (const step of job.steps) {
-      if (isObject2(step) && typeof step.run === "string") {
-        runs.push(step.run);
+    } else {
+      dependabotUpdates = parsed.value.updates;
+      const entryProblems = dependabotUpdates.length === 0 ? ["updates must contain at least one entry"] : dependabotUpdates.flatMap(dependabotEntryProblems);
+      if (entryProblems.length > 0) {
+        findings.push(
+          createRuleFinding({
+            ruleId: "dependabot/syntax",
+            stableIdentity: dependabotPath,
+            summary: `${dependabotPath} has invalid update entries: ${entryProblems.join("; ")}.`,
+            location: location(dependabotPath),
+            evidence: entryProblems.map((problem) => ({
+              label: "problem",
+              value: problem
+            }))
+          })
+        );
+      } else {
+        configured.push({
+          area: "Dependabot",
+          evidence: `${dependabotPath} parsed`
+        });
       }
     }
+  } else if (hasManifest || inventory.workflowFiles.length > 0) {
+    findings.push(
+      createRuleFinding({
+        ruleId: "dependabot/syntax",
+        stableIdentity: ".github/dependabot.yml:missing",
+        summary: "No Dependabot configuration was found.",
+        location: location(".github/dependabot.yml")
+      })
+    );
   }
-  return runs;
+  if (hasManifest && !dependabotUpdates.some((entry) => validDependabotEntry(entry, "npm"))) {
+    findings.push(
+      createRuleFinding({
+        ruleId: "dependabot/npm-coverage",
+        stableIdentity: "root",
+        summary: "Dependabot does not have a valid npm entry covering the repository root.",
+        location: location(dependabotPath ?? ".github/dependabot.yml")
+      })
+    );
+  }
+  if (inventory.workflowFiles.length > 0 && !dependabotUpdates.some(
+    (entry) => validDependabotEntry(entry, "github-actions")
+  )) {
+    findings.push(
+      createRuleFinding({
+        ruleId: "dependabot/actions-coverage",
+        stableIdentity: "root",
+        summary: "Dependabot does not have a valid github-actions entry covering the repository root.",
+        location: location(dependabotPath ?? ".github/dependabot.yml")
+      })
+    );
+  }
+  return { findings, configured };
 }
-function workflowStructureProblems(value) {
-  if (!isObject2(value.jobs) || Object.keys(value.jobs).length === 0) {
-    return ["jobs must be a non-empty mapping"];
-  }
-  const problems = [];
-  for (const [jobName, job] of Object.entries(value.jobs)) {
-    if (!isObject2(job)) {
-      problems.push(`jobs.${jobName} must be a mapping`);
-      continue;
-    }
-    if (typeof job.uses === "string" && job.uses.trim().length > 0) {
-      continue;
-    }
-    if (job["runs-on"] === void 0) {
-      problems.push(`jobs.${jobName}.runs-on is required`);
-    }
-    if (!Array.isArray(job.steps) || job.steps.length === 0) {
-      problems.push(`jobs.${jobName}.steps must be a non-empty array`);
-    }
-  }
-  return problems;
+
+// src/validation/evidence.ts
+function trackedEnvironmentFindings(paths) {
+  return paths.map(
+    (path2) => createRuleFinding({
+      ruleId: "repository/tracked-env",
+      stableIdentity: path2,
+      summary: `${path2} is a tracked environment-file risk candidate.`,
+      location: location(path2, null),
+      evidence: [{ label: "path", value: path2 }]
+    })
+  );
 }
+
+// src/validation/shell.ts
 function shellCommandSegments(command) {
   const segments = [];
   let segment = "";
@@ -12742,6 +13108,9 @@ function isPlaceholderScript(command) {
     )
   );
 }
+
+// src/validation/node.ts
+var REQUIRED_NODE_SCRIPTS = ["test", "lint", "build"];
 function parseManifest(path2, raw) {
   let parsed;
   try {
@@ -12900,82 +13269,7 @@ function validateLockAgreement(manifest, lockRoot, packageEntries) {
   }
   return mismatches;
 }
-function usesEvidence(raw) {
-  const evidence = [];
-  const occurrences = /* @__PURE__ */ new Map();
-  for (const [index, line] of raw.split(/\r?\n/).entries()) {
-    const match2 = /^\s*(?:-\s*)?uses:\s*["']?([^"'#\s]+)["']?/i.exec(line);
-    const reference = match2?.[1];
-    if (!reference || reference.startsWith("./") || reference.startsWith("docker://")) {
-      continue;
-    }
-    const separator = reference.lastIndexOf("@");
-    const action = separator >= 0 ? reference.slice(0, separator) : reference;
-    const occurrence = (occurrences.get(action) ?? 0) + 1;
-    occurrences.set(action, occurrence);
-    const revision = separator >= 0 ? reference.slice(separator + 1) : "";
-    if (!/^[a-f0-9]{40}$/i.test(revision)) {
-      evidence.push({
-        reference,
-        line: index + 1,
-        identity: `${action}\0${occurrence}`
-      });
-    }
-  }
-  return evidence;
-}
-function validDependabotEntry(entry, ecosystem) {
-  if (!isObject2(entry) || entry["package-ecosystem"] !== ecosystem) {
-    return false;
-  }
-  if (dependabotEntryProblems(entry, 0).length > 0) return false;
-  const directory = entry.directory;
-  const directories = entry.directories;
-  const coversRoot = directory === "/" || Array.isArray(directories) && directories.includes("/");
-  if (!coversRoot || !isObject2(entry.schedule)) return false;
-  return typeof entry.schedule.interval === "string" && SAFE_UPDATE_INTERVALS.has(entry.schedule.interval) && (entry.schedule.interval !== "cron" || typeof entry.schedule.cronjob === "string" && entry.schedule.cronjob.trim().length > 0);
-}
-function dependabotEntryProblems(entry, index) {
-  const prefix = `updates[${index}]`;
-  if (!isObject2(entry)) return [`${prefix} must be a mapping`];
-  const problems = [];
-  if (typeof entry["package-ecosystem"] !== "string" || entry["package-ecosystem"].trim().length === 0) {
-    problems.push(`${prefix}.package-ecosystem is required`);
-  }
-  const definesDirectory = Object.hasOwn(entry, "directory");
-  const definesDirectories = Object.hasOwn(entry, "directories");
-  const hasDirectory = typeof entry.directory === "string" && entry.directory.trim().length > 0;
-  const hasDirectories = Array.isArray(entry.directories) && entry.directories.length > 0 && entry.directories.every(
-    (directory) => typeof directory === "string" && directory.trim().length > 0
-  );
-  if (definesDirectory && definesDirectories) {
-    problems.push(
-      `${prefix}.directory and ${prefix}.directories are mutually exclusive`
-    );
-  } else if (!definesDirectory && !definesDirectories) {
-    problems.push(
-      `${prefix} requires exactly one of directory or directories`
-    );
-  } else if (definesDirectory && !hasDirectory) {
-    problems.push(`${prefix}.directory must be a non-empty string`);
-  } else if (definesDirectories && !hasDirectories) {
-    problems.push(
-      `${prefix}.directories must be a non-empty array of non-empty strings`
-    );
-  }
-  if (!isObject2(entry.schedule)) {
-    problems.push(`${prefix}.schedule must be a mapping`);
-  } else if (typeof entry.schedule.interval !== "string" || !SAFE_UPDATE_INTERVALS.has(entry.schedule.interval)) {
-    problems.push(`${prefix}.schedule.interval is unsupported`);
-  } else if (entry.schedule.interval === "cron" && (typeof entry.schedule.cronjob !== "string" || entry.schedule.cronjob.trim().length === 0)) {
-    problems.push(
-      `${prefix}.schedule.cronjob is required for a cron interval`
-    );
-  }
-  return problems;
-}
-async function validateRepository(root, inventory) {
-  const files = new Set(inventory.trackedFiles);
+async function validateNodeProject(root, files) {
   const findings = [];
   const configured = [];
   const manifestRaw = await readTracked(root, files, "package.json");
@@ -13082,6 +13376,144 @@ async function validateRepository(root, inventory) {
       }
     }
   }
+  return {
+    findings,
+    node: { manifest, scripts, declared, locked },
+    configured
+  };
+}
+
+// src/validation/workflows.ts
+var REPOSITORY_PERMISSION_VALUES = /* @__PURE__ */ new Set([
+  "read",
+  "write",
+  "none"
+]);
+function hasTrigger(value, name) {
+  if (typeof value === "string") return value === name;
+  if (Array.isArray(value)) return value.includes(name);
+  return isObject2(value) && Object.hasOwn(value, name);
+}
+function hasPullRequestTrigger(value) {
+  return hasTrigger(value, "pull_request");
+}
+function triggerNames(value) {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) {
+    return value.filter(
+      (item) => typeof item === "string"
+    );
+  }
+  return isObject2(value) ? Object.keys(value) : [];
+}
+function permissionProblems(value, allowScopedWrite = false) {
+  if (value === void 0) {
+    return ["top-level permissions are implicit"];
+  }
+  if (typeof value === "string") {
+    if (value === "read-all") return [];
+    if (value === "write-all") return ["permissions is write-all"];
+    return [
+      `permissions has unsupported value ${JSON.stringify(value)}`
+    ];
+  }
+  if (!isObject2(value)) return ["permissions is not a mapping"];
+  const problems = [];
+  for (const [scope, permission] of Object.entries(value)) {
+    if (typeof permission !== "string" || !REPOSITORY_PERMISSION_VALUES.has(permission)) {
+      problems.push(
+        `${scope}: unsupported permission ${JSON.stringify(permission)}`
+      );
+    } else if (permission === "write" && !allowScopedWrite) {
+      problems.push(`${scope}: ${permission}`);
+    }
+  }
+  return problems;
+}
+function workflowPermissionProblems(value) {
+  const problems = permissionProblems(value.permissions);
+  if (!isObject2(value.jobs)) return problems;
+  const trustedWriteTriggers = /* @__PURE__ */ new Set([
+    "push",
+    "release",
+    "schedule",
+    "workflow_dispatch"
+  ]);
+  const triggers = triggerNames(value.on);
+  const allowScopedWrite = triggers.length > 0 && triggers.every((trigger) => trustedWriteTriggers.has(trigger));
+  for (const [jobName, job] of Object.entries(value.jobs)) {
+    if (!isObject2(job) || job.permissions === void 0) continue;
+    for (const problem of permissionProblems(
+      job.permissions,
+      allowScopedWrite
+    )) {
+      problems.push(`${jobName}: ${problem}`);
+    }
+  }
+  return problems;
+}
+function workflowRuns(value) {
+  if (!isObject2(value.jobs)) return [];
+  const runs = [];
+  for (const job of Object.values(value.jobs)) {
+    if (!isObject2(job) || !Array.isArray(job.steps)) continue;
+    for (const step of job.steps) {
+      if (isObject2(step) && typeof step.run === "string") {
+        runs.push(step.run);
+      }
+    }
+  }
+  return runs;
+}
+function workflowStructureProblems(value) {
+  if (!isObject2(value.jobs) || Object.keys(value.jobs).length === 0) {
+    return ["jobs must be a non-empty mapping"];
+  }
+  const problems = [];
+  for (const [jobName, job] of Object.entries(value.jobs)) {
+    if (!isObject2(job)) {
+      problems.push(`jobs.${jobName} must be a mapping`);
+      continue;
+    }
+    if (typeof job.uses === "string" && job.uses.trim().length > 0) {
+      continue;
+    }
+    if (job["runs-on"] === void 0) {
+      problems.push(`jobs.${jobName}.runs-on is required`);
+    }
+    if (!Array.isArray(job.steps) || job.steps.length === 0) {
+      problems.push(`jobs.${jobName}.steps must be a non-empty array`);
+    }
+  }
+  return problems;
+}
+function usesEvidence(raw) {
+  const evidence = [];
+  const occurrences = /* @__PURE__ */ new Map();
+  for (const [index, line] of raw.split(/\r?\n/).entries()) {
+    const match2 = /^\s*(?:-\s*)?uses:\s*["']?([^"'#\s]+)["']?/i.exec(line);
+    const reference = match2?.[1];
+    if (!reference || reference.startsWith("./") || reference.startsWith("docker://")) {
+      continue;
+    }
+    const separator = reference.lastIndexOf("@");
+    const action = separator >= 0 ? reference.slice(0, separator) : reference;
+    const occurrence = (occurrences.get(action) ?? 0) + 1;
+    occurrences.set(action, occurrence);
+    const revision = separator >= 0 ? reference.slice(separator + 1) : "";
+    if (!/^[a-f0-9]{40}$/i.test(revision)) {
+      evidence.push({
+        reference,
+        line: index + 1,
+        identity: `${action}\0${occurrence}`
+      });
+    }
+  }
+  return evidence;
+}
+async function validateWorkflows(root, files, inventory, node) {
+  const findings = [];
+  const configured = [];
   const parsedWorkflows = [];
   for (const path2 of inventory.workflowFiles) {
     const raw = await readTracked(root, files, path2);
@@ -13162,13 +13594,13 @@ async function validateRepository(root, inventory) {
       })
     );
   }
-  if (manifest !== null) {
+  if (node.manifest !== null) {
     const workflowRoots = pullRequestWorkflows.flatMap(
       (workflow) => workflowRuns(workflow.value).flatMap(invokedNpmScripts)
     );
-    const reached = reachableScripts(workflowRoots, scripts);
+    const reached = reachableScripts(workflowRoots, node.scripts);
     for (const script of REQUIRED_NODE_SCRIPTS) {
-      if (!scripts[script] || reached.has(script)) continue;
+      if (!node.scripts[script] || reached.has(script)) continue;
       findings.push(
         createRuleFinding({
           ruleId: "workflow/script-wiring",
@@ -13182,90 +13614,38 @@ async function validateRepository(root, inventory) {
       );
     }
   }
-  const dependabotPath = files.has(".github/dependabot.yml") ? ".github/dependabot.yml" : files.has(".github/dependabot.yaml") ? ".github/dependabot.yaml" : null;
-  const dependabotRaw = dependabotPath ? await readTracked(root, files, dependabotPath) : null;
-  let dependabotUpdates = [];
-  if (dependabotPath && dependabotRaw !== null) {
-    const parsed = parseYamlObject(dependabotPath, dependabotRaw);
-    if (!parsed.value || parsed.value.version !== 2 || !Array.isArray(parsed.value.updates)) {
-      findings.push(
-        createRuleFinding({
-          ruleId: "dependabot/syntax",
-          stableIdentity: dependabotPath,
-          summary: !parsed.value ? `${dependabotPath} could not be parsed: ${parsed.errors[0]}` : `${dependabotPath} must use version 2 and contain an updates array.`,
-          location: location(dependabotPath)
-        })
-      );
-    } else {
-      dependabotUpdates = parsed.value.updates;
-      const entryProblems = dependabotUpdates.length === 0 ? ["updates must contain at least one entry"] : dependabotUpdates.flatMap(dependabotEntryProblems);
-      if (entryProblems.length > 0) {
-        findings.push(
-          createRuleFinding({
-            ruleId: "dependabot/syntax",
-            stableIdentity: dependabotPath,
-            summary: `${dependabotPath} has invalid update entries: ${entryProblems.join("; ")}.`,
-            location: location(dependabotPath),
-            evidence: entryProblems.map((problem) => ({
-              label: "problem",
-              value: problem
-            }))
-          })
-        );
-      } else {
-        configured.push({
-          area: "Dependabot",
-          evidence: `${dependabotPath} parsed`
-        });
-      }
-    }
-  } else if (manifest !== null || inventory.workflowFiles.length > 0) {
-    findings.push(
-      createRuleFinding({
-        ruleId: "dependabot/syntax",
-        stableIdentity: ".github/dependabot.yml:missing",
-        summary: "No Dependabot configuration was found.",
-        location: location(".github/dependabot.yml")
-      })
-    );
-  }
-  if (manifest !== null && !dependabotUpdates.some((entry) => validDependabotEntry(entry, "npm"))) {
-    findings.push(
-      createRuleFinding({
-        ruleId: "dependabot/npm-coverage",
-        stableIdentity: "root",
-        summary: "Dependabot does not have a valid npm entry covering the repository root.",
-        location: location(dependabotPath ?? ".github/dependabot.yml")
-      })
-    );
-  }
-  if (inventory.workflowFiles.length > 0 && !dependabotUpdates.some(
-    (entry) => validDependabotEntry(entry, "github-actions")
-  )) {
-    findings.push(
-      createRuleFinding({
-        ruleId: "dependabot/actions-coverage",
-        stableIdentity: "root",
-        summary: "Dependabot does not have a valid github-actions entry covering the repository root.",
-        location: location(dependabotPath ?? ".github/dependabot.yml")
-      })
-    );
-  }
-  for (const path2 of inventory.trackedEnvFiles) {
-    findings.push(
-      createRuleFinding({
-        ruleId: "repository/tracked-env",
-        stableIdentity: path2,
-        summary: `${path2} is a tracked environment-file risk candidate.`,
-        location: location(path2, null),
-        evidence: [{ label: "path", value: path2 }]
-      })
-    );
-  }
+  return { findings, configured };
+}
+
+// src/validators.ts
+async function validateRepository(root, inventory) {
+  const files = new Set(inventory.trackedFiles);
+  const nodeValidation = await validateNodeProject(root, files);
+  const workflowValidation = await validateWorkflows(
+    root,
+    files,
+    inventory,
+    nodeValidation.node
+  );
+  const dependabotValidation = await validateDependabot(
+    root,
+    files,
+    inventory,
+    nodeValidation.node.manifest !== null
+  );
   return {
-    findings,
-    node: { manifest, scripts, declared, locked },
-    configured
+    findings: [
+      ...nodeValidation.findings,
+      ...workflowValidation.findings,
+      ...dependabotValidation.findings,
+      ...trackedEnvironmentFindings(inventory.trackedEnvFiles)
+    ],
+    node: nodeValidation.node,
+    configured: [
+      ...nodeValidation.configured,
+      ...workflowValidation.configured,
+      ...dependabotValidation.configured
+    ]
   };
 }
 
@@ -13392,7 +13772,7 @@ function createAuditReport(identity, inventory, validation, options) {
     findings,
     ignoredFindings: configured.ignored,
     limitations: [
-      "RepoLens v0.3 validates the Node and GitHub maintenance contract. Other ecosystems are outside this release.",
+      `RepoLens ${TOOL_VERSION} validates the Node and GitHub maintenance contract. Other ecosystems are outside this release.`,
       "Configured scripts are parsed and traced into pull-request workflows but are never executed by RepoLens.",
       "Vulnerability, code, workflow-security, and secret-value analysis belong to dedicated scanners such as CodeQL, actionlint, zizmor, Trivy, or Semgrep.",
       "Registry update observations distinguish declared, locked, latest, and change type; Dependabot or Renovate owns the update proposal."

@@ -23,12 +23,13 @@ import {
 } from "../src/baseline.js";
 import { parseCliArgs } from "../src/cli.js";
 import {
+  CONFIG_SCHEMA_URL,
   parseConfig,
   renderDefaultConfig,
 } from "../src/config.js";
 import { TOOL_VERSION } from "../src/constants.js";
 import { RepoLensError } from "../src/errors.js";
-import { renderJson } from "../src/reporters.js";
+import { renderHtml, renderJson } from "../src/reporters.js";
 import { runAudit } from "../src/runner.js";
 import {
   regressionFindings,
@@ -285,7 +286,7 @@ test("keeps the CLI version synchronized with package metadata", async () => {
   const packageJson = JSON.parse(
     await readFile(resolve(testRoot, "../../package.json"), "utf8"),
   ) as { version?: string };
-  assert.equal(TOOL_VERSION, "0.3.0");
+  assert.equal(TOOL_VERSION, "0.4.0");
   assert.equal(TOOL_VERSION, packageJson.version);
 });
 
@@ -779,6 +780,77 @@ test("workflow permissions reject unsupported scalar and mapping values", async 
   }
 });
 
+test("job-scoped write permissions require trusted workflow triggers", async () => {
+  const fixture = await makeRepository();
+  try {
+    const releasePath = join(
+      fixture.root,
+      ".github",
+      "workflows",
+      "release.yml",
+    );
+    const releaseWorkflow = `name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  publish:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+`;
+    await writeFile(releasePath, releaseWorkflow, "utf8");
+    const releaseAudit = await runAudit(auditOptions(fixture.root));
+    assert.ok(
+      !releaseAudit.report.findings.some(
+        (finding) =>
+          finding.ruleId === "workflow/permissions" &&
+          finding.location?.path === ".github/workflows/release.yml",
+      ),
+    );
+
+    await writeFile(
+      releasePath,
+      releaseWorkflow.replace(
+        '  push:\n    tags: ["v*"]',
+        "  pull_request:",
+      ),
+      "utf8",
+    );
+    const pullRequestAudit = await runAudit(auditOptions(fixture.root));
+    const unsafeWrite = pullRequestAudit.report.findings.find(
+      (finding) =>
+        finding.ruleId === "workflow/permissions" &&
+        finding.location?.path === ".github/workflows/release.yml",
+    );
+    assert.match(unsafeWrite?.summary ?? "", /publish: contents: write/);
+
+    await writeFile(
+      releasePath,
+      releaseWorkflow.replace(
+        '  push:\n    tags: ["v*"]',
+        "  workflow_call:",
+      ),
+      "utf8",
+    );
+    const reusableAudit = await runAudit(auditOptions(fixture.root));
+    assert.ok(
+      reusableAudit.report.findings.some(
+        (finding) =>
+          finding.ruleId === "workflow/permissions" &&
+          finding.location?.path === ".github/workflows/release.yml" &&
+          finding.summary.includes("publish: contents: write"),
+      ),
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("Dependabot directory forms are mutually exclusive and structural", async () => {
   const fixture = await makeRepository();
   try {
@@ -1145,6 +1217,23 @@ test("reviewed config ignores require fingerprints, reasons, and expiration", as
 });
 
 test("schema 1 cannot silently ignore schema 2 rule policy", () => {
+  const rendered = JSON.parse(renderDefaultConfig()) as {
+    $schema?: string;
+    schema?: number;
+  };
+  assert.equal(rendered.$schema, CONFIG_SCHEMA_URL);
+  assert.equal(rendered.schema, 2);
+  assert.equal(
+    parseConfig({
+      $schema: CONFIG_SCHEMA_URL,
+      schema: 2,
+    }).schema,
+    2,
+  );
+  assert.throws(
+    () => parseConfig({ $schema: "file:///tmp/schema.json", schema: 2 }),
+    /\$schema must be an HTTPS URL/,
+  );
   assert.throws(
     () =>
       parseConfig({
@@ -1193,6 +1282,37 @@ test("schema 1 cannot silently ignore schema 2 rule policy", () => {
       }),
     /RFC 3339 date-time/,
   );
+});
+
+test("standalone HTML reports preserve policy, evidence, and limitations", async () => {
+  const fixture = await makeRepository();
+  try {
+    await introduceMutableAction(fixture.root);
+    const result = await runAudit(auditOptions(fixture.root));
+    const report = {
+      ...result.report,
+      repository: {
+        ...result.report.repository,
+        name: "<unsafe repository>",
+      },
+      limitations: [
+        ...result.report.limitations,
+        "Does not execute <repository scripts>.",
+      ],
+    };
+    const html = renderHtml(report);
+    assert.match(html, /STATUS POLICY PASSED/);
+    assert.match(html, /Configured evidence/);
+    assert.match(html, /Scope and limitations/);
+    assert.match(html, /Finding ID/);
+    assert.match(html, /offline report/);
+    assert.match(html, /default-src &#39;none&#39;|default-src 'none'/);
+    assert.match(html, /&lt;unsafe repository&gt;/);
+    assert.match(html, /Does not execute &lt;repository scripts&gt;\./);
+    assert.doesNotMatch(html, /<unsafe repository>/);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("baseline metadata validates owner, reason, timestamps, and commit", () => {

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import {
   DEFAULT_CONFIG_FILE,
   DEFAULT_EXCLUDES,
+  TOOL_VERSION,
 } from "./constants.js";
 import { RepoLensError } from "./errors.js";
 import { createRuleFinding, RULES } from "./rules.js";
@@ -29,6 +30,9 @@ const DEFAULT_POLICY: RepoLensPolicyConfig = {
   failOn: "new-warning",
   strict: false,
 };
+
+export const CONFIG_SCHEMA_URL =
+  `https://raw.githubusercontent.com/rad1092/repolens/v${TOOL_VERSION}/.repolens.schema.json`;
 
 export const DEFAULT_CONFIG: RepoLensConfig = {
   schema: 2,
@@ -230,15 +234,23 @@ export function parseConfig(value: unknown): RepoLensConfig {
     value,
     value.schema === 1
       ? new Set([
+          "$schema",
           "schema",
           "excludes",
           "staleDays",
           "largeFileMB",
           "policy",
         ])
-      : new Set(["schema", "excludes", "policy", "checks"]),
+      : new Set(["$schema", "schema", "excludes", "policy", "checks"]),
     "RepoLens config",
   );
+  if (
+    value.$schema !== undefined &&
+    (typeof value.$schema !== "string" ||
+      !/^https:\/\/\S+$/.test(value.$schema))
+  ) {
+    throw new Error("$schema must be an HTTPS URL when provided.");
+  }
 
   let excludes = [...DEFAULT_CONFIG.excludes];
   if (value.excludes !== undefined) {
@@ -464,7 +476,11 @@ export async function loadConfig(
 }
 
 export function renderDefaultConfig(): string {
-  return `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`;
+  return `${JSON.stringify(
+    { $schema: CONFIG_SCHEMA_URL, ...DEFAULT_CONFIG },
+    null,
+    2,
+  )}\n`;
 }
 
 export async function writeDefaultConfig(

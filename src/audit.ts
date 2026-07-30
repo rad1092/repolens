@@ -166,7 +166,7 @@ export function createAuditReport(
     findings,
     ignoredFindings: configured.ignored,
     limitations: [
-      "RepoLens v0.3 validates the Node and GitHub maintenance contract. Other ecosystems are outside this release.",
+      `RepoLens ${TOOL_VERSION} validates the Node and GitHub maintenance contract. Other ecosystems are outside this release.`,
       "Configured scripts are parsed and traced into pull-request workflows but are never executed by RepoLens.",
       "Vulnerability, code, workflow-security, and secret-value analysis belong to dedicated scanners such as CodeQL, actionlint, zizmor, Trivy, or Semgrep.",
       "Registry update observations distinguish declared, locked, latest, and change type; Dependabot or Renovate owns the update proposal.",
