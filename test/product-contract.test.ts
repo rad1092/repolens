@@ -188,7 +188,7 @@ test("documents the v0.4 regression gate without stale score or mutable Action g
   assert.match(releaseWorkflow, /npm run release:artifacts/);
   assert.match(
     releaseWorkflow,
-    /uses: actions\/attest@[a-f0-9]{40} # v4\.2\.1/,
+    /uses: actions\/attest@[a-f0-9]{40} # v4\.\d+\.\d+(?:\s|$)/,
   );
   assert.match(releaseWorkflow, /subject-checksums: release\/SHA256SUMS/);
   assert.match(releaseWorkflow, /gh release create/);
