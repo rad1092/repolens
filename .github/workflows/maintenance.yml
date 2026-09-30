@@ -1,18 +1,20 @@
 name: RepoLens maintenance
 
 on:
-  pull_request:
-  push:
-    branches: ["main"]
   schedule:
-    - cron: "17 0 * * 1"
+    - cron: "17 0 1 * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   inspect:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

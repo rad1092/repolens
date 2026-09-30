@@ -3,18 +3,34 @@ name: CI
 on:
   push:
     branches: ["main"]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE*'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE*'
   workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: Check every supported Node.js version
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["20.11.0", "22", "24"]
+        node-version: ${{ fromJSON(inputs.full_matrix && '["20.11.0","22","24"]' || '["22"]') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
