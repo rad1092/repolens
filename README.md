@@ -30,27 +30,19 @@ the pinned GitHub Action; nothing is uploaded.
 
 ## Install
 
-Node.js 20.11 or newer.
-
-```sh
-npx @rad1092/repolens setup .
-```
-
-Or install it:
-
-```sh
-npm install --global @rad1092/repolens
-repolens --version
-```
-
-The npm package is published from the release workflow with npm provenance.
-Each GitHub Release also carries the package tarball, its SHA-256 digest and a
-build attestation:
+Node.js 20.11 or newer. RepoLens is not on the npm registry; install the
+package tarball from a GitHub Release, which also carries its SHA-256 digest and
+a build attestation:
 
 ```sh
 npm install --global \
   https://github.com/rad1092/repolens/releases/download/v0.4.0/rad1092-repolens-0.4.0.tgz
+repolens --version
 ```
+
+v0.4.0 is not published yet. Until it is, install
+`https://github.com/rad1092/repolens/releases/download/v0.3.0/rad1092-repolens-0.3.0.tgz`,
+which reads npm lockfiles only.
 
 The unscoped `repolens` name on npm belongs to another project.
 
@@ -268,7 +260,7 @@ checkout, configuration, or report.
 
 ## Release artifacts
 
-The tag workflow publishes three release artifacts and the npm package:
+The tag workflow publishes three release artifacts:
 
 - `rad1092-repolens-<version>.tgz` — installable CLI package
 - `SHA256SUMS` — digest for the package bytes

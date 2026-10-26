@@ -127,7 +127,8 @@ test("documents the v0.4 regression gate without stale score or mutable Action g
   assert.match(readme, /IMMUTABLE_RELEASES_READ_TOKEN/);
   assert.match(readme, /existing\s+releases are not changed retroactively/);
   assert.match(readme, /Node 20\.11, 22, and 24/);
-  assert.match(readme, /npx @rad1092\/repolens setup \./);
+  assert.doesNotMatch(readme, /npx @rad1092|npm install --global @rad1092/);
+  assert.doesNotMatch(landing, /npx @rad1092/);
   assert.match(readme, /OpenSSF Scorecard/);
   assert.match(readme, /pnpm-lock\.yaml/);
   assert.match(
