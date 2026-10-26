@@ -121,13 +121,13 @@ const definitions = [
   {
     id: "node/lockfile-syntax",
     check: "lockfile",
-    title: "npm lockfile syntax",
+    title: "Lockfile syntax",
     defaultSeverity: "critical",
     source: "repository",
     explanation:
-      "A malformed package-lock.json cannot reproduce the declared dependency graph.",
+      "A missing or malformed lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock or bun.lock) cannot reproduce the declared dependency graph.",
     remediation:
-      "Regenerate package-lock.json with the repository's supported npm version and review the diff.",
+      "Regenerate the lockfile with the repository's package manager, for example npm install --package-lock-only or pnpm install --lockfile-only, and review the diff.",
   },
   {
     id: "node/lockfile-sync",
@@ -136,9 +136,9 @@ const definitions = [
     defaultSeverity: "warning",
     source: "repository",
     explanation:
-      "The root dependency declarations in package.json and package-lock.json must agree.",
+      "The root dependency declarations in package.json and the lockfile must agree.",
     remediation:
-      "Run npm install --package-lock-only with the supported npm version, then review and commit the lockfile change.",
+      "Update the lockfile with the repository's package manager (the finding's regenerate evidence names the command), then review and commit the change.",
   },
   {
     id: "node/script-contract",

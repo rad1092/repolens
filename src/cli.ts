@@ -56,9 +56,9 @@ Usage:
   repolens explain <rule-id>
 
 Setup and acceptance:
-  --reason <text>       Why current debt is accepted
-  --owner <name>        Reviewer responsible for the acceptance
-  --expires <ISO time>  Acceptance expiration (default: 90 days)
+  --reason <text>       Why current debt is accepted (default: initial review note)
+  --owner <name>        Reviewer responsible (default: git config user.name)
+  --expires <when>      ISO time or duration such as 30d, 6m, 1y (default: 90d)
   --action-sha <sha>    Immutable Action commit; resolved from this release by default
   --from-v2 <report>    Record an explicit migration from a reviewed v2 report
   --force               Replace the requested setup or baseline file

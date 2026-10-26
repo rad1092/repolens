@@ -67,25 +67,75 @@ export function shellCommandSegments(command: string): string[] {
   return segments;
 }
 
-export function invokedNpmScripts(command: string): string[] {
+// Subcommands that are not package scripts. `pnpm <name>` and `yarn <name>`
+// run the script <name> for anything else.
+const PNPM_COMMANDS = new Set([
+  "add", "audit", "bin", "config", "create", "dedupe", "deploy", "dlx", "doctor",
+  "env", "exec", "fetch", "i", "import", "init", "install", "install-test",
+  "licenses", "link", "list", "ls", "outdated", "pack", "patch", "patch-commit",
+  "prune", "publish", "rebuild", "recursive", "remove", "rm", "root", "server",
+  "setup", "store", "un", "uninstall", "unlink", "up", "update", "why",
+]);
+const YARN_COMMANDS = new Set([
+  "add", "audit", "autoclean", "bin", "cache", "check", "config", "constraints",
+  "create", "dedupe", "dlx", "exec", "explain", "generate-lock-entry", "global",
+  "help", "import", "info", "init", "install", "licenses", "link", "list",
+  "login", "logout", "node", "npm", "outdated", "owner", "pack", "patch",
+  "patch-commit", "plugin", "policies", "publish", "rebuild", "remove",
+  "search", "set", "tag", "team", "unlink", "unplug", "up", "upgrade",
+  "upgrade-interactive", "version", "why", "workspace", "workspaces",
+]);
+// Flags that take a separate value, so the value is not read as a script.
+const VALUE_FLAGS = new Set([
+  "--filter", "-F", "--dir", "-C", "--prefix", "--workspace", "-w", "--cwd",
+  "--reporter", "--loglevel",
+]);
+const NPM_BARE_SCRIPTS = new Set(["test", "start", "stop", "restart"]);
+
+function words(segment: string): string[] {
+  return segment.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+}
+
+/**
+ * Package scripts a shell command runs through npm, pnpm, Yarn or Bun, for
+ * example `npm run lint`, `pnpm --filter web build` or `bun run test`.
+ */
+export function invokedPackageScripts(command: string): string[] {
   const scripts: string[] = [];
-  const expression =
-    /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+))\s+)*(?:(?:command|exec)\s+)?npm\s+(?:--[^\s]+\s+)*(?:(run|run-script)\s+)?([A-Za-z0-9:_-]+)(?:\s|$)/;
   for (const segment of shellCommandSegments(command)) {
-    const match = expression.exec(segment);
-    if (!match) continue;
-    const explicitRun = match[1] !== undefined;
-    const script = match[2];
-    if (!script) continue;
-    if (
-      explicitRun ||
-      script === "test" ||
-      script === "start" ||
-      script === "stop" ||
-      script === "restart"
-    ) {
-      scripts.push(script);
+    const tokens = words(segment);
+    let index = 0;
+    while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index]!)) {
+      index += 1;
     }
+    if (tokens[index] === "command" || tokens[index] === "exec") index += 1;
+    const tool = tokens[index];
+    if (tool !== "npm" && tool !== "pnpm" && tool !== "yarn" && tool !== "bun") {
+      continue;
+    }
+    index += 1;
+    const next = (): string | undefined => {
+      while (index < tokens.length) {
+        const token = tokens[index]!;
+        if (!token.startsWith("-")) return token;
+        index += 1;
+        if (!token.includes("=") && VALUE_FLAGS.has(token)) index += 1;
+      }
+      return undefined;
+    };
+    const first = next();
+    if (first === undefined) continue;
+    if (first === "run" || first === "run-script") {
+      index += 1;
+      const script = next();
+      if (script && /^[A-Za-z0-9:_-]+$/.test(script)) scripts.push(script);
+      continue;
+    }
+    if (!/^[A-Za-z0-9:_-]+$/.test(first)) continue;
+    if (tool === "npm" && NPM_BARE_SCRIPTS.has(first)) scripts.push(first);
+    if (tool === "pnpm" && !PNPM_COMMANDS.has(first)) scripts.push(first);
+    if (tool === "yarn" && !YARN_COMMANDS.has(first)) scripts.push(first);
+    // `bun test` is Bun's own test runner, so Bun scripts need `bun run`.
   }
   return scripts;
 }
@@ -102,7 +152,7 @@ export function reachableScripts(
     reached.add(script);
     const command = scripts[script];
     if (!command) continue;
-    for (const nested of invokedNpmScripts(command)) {
+    for (const nested of invokedPackageScripts(command)) {
       if (!reached.has(nested)) queue.push(nested);
     }
   }

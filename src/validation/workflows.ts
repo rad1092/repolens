@@ -14,7 +14,7 @@ import {
   type JsonObject,
 } from "./shared.js";
 import {
-  invokedNpmScripts,
+  invokedPackageScripts,
   reachableScripts,
 } from "./shell.js";
 
@@ -285,7 +285,7 @@ export async function validateWorkflows(
 
   if (node.manifest !== null) {
     const workflowRoots = pullRequestWorkflows.flatMap((workflow) =>
-      workflowRuns(workflow.value).flatMap(invokedNpmScripts),
+      workflowRuns(workflow.value).flatMap(invokedPackageScripts),
     );
     const reached = reachableScripts(workflowRoots, node.scripts);
     for (const script of REQUIRED_NODE_SCRIPTS) {
@@ -294,7 +294,7 @@ export async function validateWorkflows(
         createRuleFinding({
           ruleId: "workflow/script-wiring",
           stableIdentity: script,
-          summary: `The ${script} script exists but no pull-request workflow invokes it, directly or through another npm script.`,
+          summary: `The ${script} script exists but no pull-request workflow invokes it, directly or through another package script.`,
           location: location(
             pullRequestWorkflows[0]?.path ??
               inventory.workflowFiles[0] ??

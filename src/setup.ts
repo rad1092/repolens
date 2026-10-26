@@ -58,6 +58,20 @@ function defaultExpiry(now: Date): string {
   ).toISOString();
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DURATION_DAYS: Record<string, number> = { d: 1, w: 7, m: 30, y: 365 };
+
+/**
+ * Accepts an RFC 3339 time or a duration from now such as 30d, 12w, 6m or 1y.
+ */
+export function resolveExpiry(value: string | null, now: Date): string {
+  if (value === null) return defaultExpiry(now);
+  const duration = /^(\d{1,4})([dwmy])$/.exec(value.trim());
+  if (!duration) return value;
+  const days = Number(duration[1]) * DURATION_DAYS[duration[2]!]!;
+  return new Date(now.getTime() + days * DAY_MS).toISOString();
+}
+
 async function defaultOwner(target: string): Promise<string> {
   const result = await runCommand("git", ["config", "user.name"], {
     cwd: target,
@@ -102,7 +116,7 @@ async function acceptance(
     "Initial repository maintenance debt reviewed during setup";
   const owner = input.owner?.trim() || (await defaultOwner(target));
   const acceptedAt = now.toISOString();
-  const expiresAt = input.expiresAt ?? defaultExpiry(now);
+  const expiresAt = resolveExpiry(input.expiresAt, now);
   const expiration = parseRfc3339Timestamp(expiresAt);
   if (reason.length < 8) {
     throw new RepoLensError(

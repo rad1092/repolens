@@ -9628,11 +9628,11 @@ var definitions = [
   {
     id: "node/lockfile-syntax",
     check: "lockfile",
-    title: "npm lockfile syntax",
+    title: "Lockfile syntax",
     defaultSeverity: "critical",
     source: "repository",
-    explanation: "A malformed package-lock.json cannot reproduce the declared dependency graph.",
-    remediation: "Regenerate package-lock.json with the repository's supported npm version and review the diff."
+    explanation: "A missing or malformed lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock or bun.lock) cannot reproduce the declared dependency graph.",
+    remediation: "Regenerate the lockfile with the repository's package manager, for example npm install --package-lock-only or pnpm install --lockfile-only, and review the diff."
   },
   {
     id: "node/lockfile-sync",
@@ -9640,8 +9640,8 @@ var definitions = [
     title: "Manifest and lockfile agreement",
     defaultSeverity: "warning",
     source: "repository",
-    explanation: "The root dependency declarations in package.json and package-lock.json must agree.",
-    remediation: "Run npm install --package-lock-only with the supported npm version, then review and commit the lockfile change."
+    explanation: "The root dependency declarations in package.json and the lockfile must agree.",
+    remediation: "Update the lockfile with the repository's package manager (the finding's regenerate evidence names the command), then review and commit the change."
   },
   {
     id: "node/script-contract",
@@ -13017,7 +13017,9 @@ async function validateDependabot(root, files, inventory, hasManifest) {
       })
     );
   }
-  if (hasManifest && !dependabotUpdates.some((entry) => validDependabotEntry(entry, "npm"))) {
+  if (hasManifest && !dependabotUpdates.some(
+    (entry) => validDependabotEntry(entry, "npm") || validDependabotEntry(entry, "bun")
+  )) {
     findings.push(
       createRuleFinding({
         ruleId: "dependabot/npm-coverage",
@@ -13054,6 +13056,263 @@ function trackedEnvironmentFindings(paths) {
     })
   );
 }
+
+// src/validation/lockfiles.ts
+var import_yaml2 = __toESM(require_dist(), 1);
+var LOCKFILES = [
+  { manager: "npm", path: "package-lock.json" },
+  { manager: "npm", path: "npm-shrinkwrap.json" },
+  { manager: "pnpm", path: "pnpm-lock.yaml" },
+  { manager: "yarn", path: "yarn.lock" },
+  { manager: "bun", path: "bun.lock" },
+  { manager: "bun", path: "bun.lockb" }
+];
+var LOCKFILE_REGENERATE = {
+  npm: "npm install --package-lock-only",
+  pnpm: "pnpm install --lockfile-only",
+  yarn: "yarn install --mode update-lockfile",
+  bun: "bun install --lockfile-only"
+};
+var SCOPES = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies"
+];
+function declaredPackageManager(manifest) {
+  const value = manifest?.packageManager;
+  if (typeof value !== "string") return null;
+  const name = value.split("@")[0]?.trim();
+  return name === "npm" || name === "pnpm" || name === "yarn" || name === "bun" ? name : null;
+}
+function chooseLockfile(files, declared) {
+  const tracked = LOCKFILES.filter((candidate) => files.has(candidate.path));
+  if (declared) {
+    const own = tracked.find((candidate) => candidate.manager === declared);
+    const expected = own ?? LOCKFILES.find((candidate) => candidate.manager === declared);
+    return { expected, found: own ?? null };
+  }
+  return { expected: tracked[0] ?? null, found: tracked[0] ?? null };
+}
+function dependencyMap(value) {
+  const result = /* @__PURE__ */ new Map();
+  if (!isObject2(value)) return result;
+  for (const [name, range2] of Object.entries(value)) {
+    if (typeof range2 === "string") result.set(name, range2);
+  }
+  return result;
+}
+function compareRoot(manifest, specifier, lockNames) {
+  const mismatches = [];
+  for (const scope of SCOPES) {
+    const expected = dependencyMap(manifest[scope]);
+    for (const [name, range2] of expected) {
+      const actual = specifier(scope, name);
+      if (actual !== range2) {
+        mismatches.push({ scope, name, expected: range2, actual: actual ?? null });
+      }
+    }
+    for (const name of lockNames(scope)) {
+      if (!expected.has(name)) {
+        mismatches.push({
+          scope,
+          name,
+          expected: "absent",
+          actual: specifier(scope, name) ?? "present"
+        });
+      }
+    }
+  }
+  return mismatches;
+}
+function declaredDependencies(manifest) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const scope of SCOPES) {
+    for (const [name, range2] of dependencyMap(manifest[scope])) {
+      if (!seen.has(name)) seen.set(name, range2);
+    }
+  }
+  return [...seen];
+}
+function errorMessage(error, fallback) {
+  return error instanceof Error ? error.message : fallback;
+}
+function parsePnpmLockfile(raw, manifest) {
+  let doc;
+  try {
+    doc = (0, import_yaml2.parse)(raw);
+  } catch (error) {
+    return failed(errorMessage(error, "Invalid YAML."));
+  }
+  if (!isObject2(doc)) return failed("pnpm-lock.yaml must contain a mapping.");
+  const importer = isObject2(doc.importers) && isObject2(doc.importers["."]) ? doc.importers["."] : doc;
+  const specifiers = isObject2(importer.specifiers) ? importer.specifiers : {};
+  const entry = (scope, name) => {
+    const group = importer[scope];
+    return isObject2(group) ? group[name] : void 0;
+  };
+  const specifier = (scope, name) => {
+    const value = entry(scope, name);
+    if (value === void 0) return void 0;
+    if (isObject2(value)) {
+      return typeof value.specifier === "string" ? value.specifier : void 0;
+    }
+    const legacy = specifiers[name];
+    return typeof legacy === "string" ? legacy : void 0;
+  };
+  const locked = /* @__PURE__ */ new Map();
+  for (const scope of SCOPES) {
+    const group = importer[scope];
+    if (!isObject2(group)) continue;
+    for (const [name, value] of Object.entries(group)) {
+      const version = isObject2(value) ? value.version : value;
+      if (typeof version === "string") {
+        locked.set(name, version.replace(/\(.*$/, ""));
+      }
+    }
+  }
+  const mismatches = compareRoot(manifest, specifier, (scope) => {
+    const group = importer[scope];
+    return isObject2(group) ? Object.keys(group) : [];
+  });
+  return { error: null, locked, mismatches, checked: true };
+}
+function parseYarnLockfile(raw, manifest) {
+  const versions = /* @__PURE__ */ new Map();
+  let current = [];
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    if (line.trim() === "" || line.startsWith("#")) continue;
+    if (!line.startsWith(" ")) {
+      if (!line.endsWith(":")) {
+        return failed(`Unexpected line in yarn.lock: ${line.slice(0, 80)}`);
+      }
+      const header = line.slice(0, -1);
+      current = header === "__metadata" ? [] : header.split(/,\s*/).map((descriptor) => descriptor.trim().replace(/^"|"$/g, "")).filter(Boolean);
+      for (const descriptor of current) versions.set(descriptor, "");
+      continue;
+    }
+    const version = /^\s+version:?\s+"?([^"\s]+)"?\s*$/.exec(line);
+    if (version && current.length > 0) {
+      for (const descriptor of current) versions.set(descriptor, version[1]);
+      current = [];
+    }
+  }
+  if (versions.size === 0 && declaredDependencies(manifest).length > 0) {
+    return failed("yarn.lock has no package entries.");
+  }
+  const locked = /* @__PURE__ */ new Map();
+  const mismatches = [];
+  for (const [name, range2] of declaredDependencies(manifest)) {
+    if (/^(?:workspace|patch|portal|link|file):/.test(range2)) continue;
+    const keys = [`${name}@${range2}`, `${name}@npm:${range2}`];
+    const key = keys.find((candidate) => versions.has(candidate));
+    if (key === void 0) {
+      mismatches.push({
+        scope: "packages",
+        name: `${name}@${range2}`,
+        expected: "lockfile entry",
+        actual: null
+      });
+      continue;
+    }
+    const version = versions.get(key);
+    if (version) locked.set(name, version);
+  }
+  return { error: null, locked, mismatches, checked: true };
+}
+function stripTrailingCommas(raw) {
+  let result = "";
+  let inString = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (inString) {
+      result += character;
+      if (character === "\\") {
+        result += raw[index + 1] ?? "";
+        index += 1;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      result += character;
+      continue;
+    }
+    if (character === ",") {
+      const rest = raw.slice(index + 1);
+      if (/^\s*[}\]]/.test(rest)) continue;
+    }
+    result += character;
+  }
+  return result;
+}
+function parseBunLockfile(raw, manifest) {
+  let doc;
+  try {
+    doc = JSON.parse(stripTrailingCommas(raw));
+  } catch (error) {
+    return failed(errorMessage(error, "Invalid JSON."));
+  }
+  if (!isObject2(doc)) return failed("bun.lock must contain an object.");
+  const workspace = isObject2(doc.workspaces) && isObject2(doc.workspaces[""]) ? doc.workspaces[""] : null;
+  if (!workspace) {
+    return {
+      error: null,
+      locked: /* @__PURE__ */ new Map(),
+      mismatches: [
+        {
+          scope: "root",
+          name: 'workspaces[""]',
+          expected: "root dependency metadata",
+          actual: null
+        }
+      ],
+      checked: true
+    };
+  }
+  const packages = isObject2(doc.packages) ? doc.packages : {};
+  const mismatches = compareRoot(
+    manifest,
+    (scope, name) => {
+      const group = workspace[scope];
+      return isObject2(group) && typeof group[name] === "string" ? group[name] : void 0;
+    },
+    (scope) => {
+      const group = workspace[scope];
+      return isObject2(group) ? Object.keys(group) : [];
+    }
+  );
+  const locked = /* @__PURE__ */ new Map();
+  for (const [name] of declaredDependencies(manifest)) {
+    const entry = packages[name];
+    if (!Array.isArray(entry)) {
+      mismatches.push({
+        scope: "packages",
+        name,
+        expected: "installed package entry",
+        actual: null
+      });
+      continue;
+    }
+    const resolved = entry[0];
+    if (typeof resolved === "string") {
+      const at = resolved.lastIndexOf("@");
+      if (at > 0) locked.set(name, resolved.slice(at + 1));
+    }
+  }
+  return { error: null, locked, mismatches, checked: true };
+}
+function failed(error) {
+  return { error, locked: /* @__PURE__ */ new Map(), mismatches: [], checked: true };
+}
+var UNCHECKED_LOCKFILE = {
+  error: null,
+  locked: /* @__PURE__ */ new Map(),
+  mismatches: [],
+  checked: false
+};
 
 // src/validation/shell.ts
 function shellCommandSegments(command) {
@@ -13107,18 +13366,152 @@ function shellCommandSegments(command) {
   push();
   return segments;
 }
-function invokedNpmScripts(command) {
+var PNPM_COMMANDS = /* @__PURE__ */ new Set([
+  "add",
+  "audit",
+  "bin",
+  "config",
+  "create",
+  "dedupe",
+  "deploy",
+  "dlx",
+  "doctor",
+  "env",
+  "exec",
+  "fetch",
+  "i",
+  "import",
+  "init",
+  "install",
+  "install-test",
+  "licenses",
+  "link",
+  "list",
+  "ls",
+  "outdated",
+  "pack",
+  "patch",
+  "patch-commit",
+  "prune",
+  "publish",
+  "rebuild",
+  "recursive",
+  "remove",
+  "rm",
+  "root",
+  "server",
+  "setup",
+  "store",
+  "un",
+  "uninstall",
+  "unlink",
+  "up",
+  "update",
+  "why"
+]);
+var YARN_COMMANDS = /* @__PURE__ */ new Set([
+  "add",
+  "audit",
+  "autoclean",
+  "bin",
+  "cache",
+  "check",
+  "config",
+  "constraints",
+  "create",
+  "dedupe",
+  "dlx",
+  "exec",
+  "explain",
+  "generate-lock-entry",
+  "global",
+  "help",
+  "import",
+  "info",
+  "init",
+  "install",
+  "licenses",
+  "link",
+  "list",
+  "login",
+  "logout",
+  "node",
+  "npm",
+  "outdated",
+  "owner",
+  "pack",
+  "patch",
+  "patch-commit",
+  "plugin",
+  "policies",
+  "publish",
+  "rebuild",
+  "remove",
+  "search",
+  "set",
+  "tag",
+  "team",
+  "unlink",
+  "unplug",
+  "up",
+  "upgrade",
+  "upgrade-interactive",
+  "version",
+  "why",
+  "workspace",
+  "workspaces"
+]);
+var VALUE_FLAGS = /* @__PURE__ */ new Set([
+  "--filter",
+  "-F",
+  "--dir",
+  "-C",
+  "--prefix",
+  "--workspace",
+  "-w",
+  "--cwd",
+  "--reporter",
+  "--loglevel"
+]);
+var NPM_BARE_SCRIPTS = /* @__PURE__ */ new Set(["test", "start", "stop", "restart"]);
+function words(segment) {
+  return segment.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+}
+function invokedPackageScripts(command) {
   const scripts = [];
-  const expression = /^(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s]+))\s+)*(?:(?:command|exec)\s+)?npm\s+(?:--[^\s]+\s+)*(?:(run|run-script)\s+)?([A-Za-z0-9:_-]+)(?:\s|$)/;
   for (const segment of shellCommandSegments(command)) {
-    const match2 = expression.exec(segment);
-    if (!match2) continue;
-    const explicitRun = match2[1] !== void 0;
-    const script = match2[2];
-    if (!script) continue;
-    if (explicitRun || script === "test" || script === "start" || script === "stop" || script === "restart") {
-      scripts.push(script);
+    const tokens = words(segment);
+    let index = 0;
+    while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) {
+      index += 1;
     }
+    if (tokens[index] === "command" || tokens[index] === "exec") index += 1;
+    const tool = tokens[index];
+    if (tool !== "npm" && tool !== "pnpm" && tool !== "yarn" && tool !== "bun") {
+      continue;
+    }
+    index += 1;
+    const next = () => {
+      while (index < tokens.length) {
+        const token = tokens[index];
+        if (!token.startsWith("-")) return token;
+        index += 1;
+        if (!token.includes("=") && VALUE_FLAGS.has(token)) index += 1;
+      }
+      return void 0;
+    };
+    const first = next();
+    if (first === void 0) continue;
+    if (first === "run" || first === "run-script") {
+      index += 1;
+      const script = next();
+      if (script && /^[A-Za-z0-9:_-]+$/.test(script)) scripts.push(script);
+      continue;
+    }
+    if (!/^[A-Za-z0-9:_-]+$/.test(first)) continue;
+    if (tool === "npm" && NPM_BARE_SCRIPTS.has(first)) scripts.push(first);
+    if (tool === "pnpm" && !PNPM_COMMANDS.has(first)) scripts.push(first);
+    if (tool === "yarn" && !YARN_COMMANDS.has(first)) scripts.push(first);
   }
   return scripts;
 }
@@ -13131,7 +13524,7 @@ function reachableScripts(roots, scripts) {
     reached.add(script);
     const command = scripts[script];
     if (!command) continue;
-    for (const nested of invokedNpmScripts(command)) {
+    for (const nested of invokedPackageScripts(command)) {
       if (!reached.has(nested)) queue.push(nested);
     }
   }
@@ -13241,7 +13634,7 @@ function parseLockfile(raw) {
   }
   return { root, locked, packageEntries, error: null };
 }
-function dependencyMap(value) {
+function dependencyMap2(value) {
   const result = /* @__PURE__ */ new Map();
   if (!isObject2(value)) return result;
   for (const [name, range2] of Object.entries(value)) {
@@ -13266,8 +13659,8 @@ function validateLockAgreement(manifest, lockRoot, packageEntries) {
     "devDependencies",
     "optionalDependencies"
   ]) {
-    const expected = dependencyMap(manifest[scope]);
-    const actual = dependencyMap(lockRoot[scope]);
+    const expected = dependencyMap2(manifest[scope]);
+    const actual = dependencyMap2(lockRoot[scope]);
     for (const [name, range2] of expected) {
       if (actual.get(name) !== range2) {
         mismatches.push({
@@ -13291,9 +13684,9 @@ function validateLockAgreement(manifest, lockRoot, packageEntries) {
   }
   const checkedPackageEntries = /* @__PURE__ */ new Set();
   for (const dependency of [
-    ...dependencyMap(manifest.dependencies).keys(),
-    ...dependencyMap(manifest.devDependencies).keys(),
-    ...dependencyMap(manifest.optionalDependencies).keys()
+    ...dependencyMap2(manifest.dependencies).keys(),
+    ...dependencyMap2(manifest.devDependencies).keys(),
+    ...dependencyMap2(manifest.optionalDependencies).keys()
   ]) {
     if (checkedPackageEntries.has(dependency)) continue;
     checkedPackageEntries.add(dependency);
@@ -13336,57 +13729,47 @@ async function validateNodeProject(root, files) {
       });
     }
   }
-  const lockRaw = await readTracked(root, files, "package-lock.json");
-  let lockRoot = null;
+  const choice = chooseLockfile(files, declaredPackageManager(manifest));
+  const lockPath = choice.expected?.path ?? "package-lock.json";
+  const packageManager = choice.expected?.manager ?? "npm";
   let locked = /* @__PURE__ */ new Map();
-  let packageEntries = /* @__PURE__ */ new Set();
   if (manifest !== null) {
-    if (lockRaw === null) {
+    const lockRaw = choice.found ? await readTracked(root, files, choice.found.path) : null;
+    if (lockRaw === null || choice.found === null) {
       findings.push(
         createRuleFinding({
           ruleId: "node/lockfile-syntax",
-          stableIdentity: "package-lock.json:missing",
-          summary: "package-lock.json is missing for the root Node project.",
-          location: location("package.json")
+          // npm keeps its original identity so existing baselines still match.
+          stableIdentity: packageManager === "npm" ? "package-lock.json:missing" : `${lockPath}:missing`,
+          summary: choice.expected ? `${lockPath} is missing for the root Node project.` : "No lockfile was found for the root Node project (package-lock.json, pnpm-lock.yaml, yarn.lock or bun.lock).",
+          location: location("package.json"),
+          evidence: [
+            { label: "regenerate", value: LOCKFILE_REGENERATE[packageManager] }
+          ]
         })
       );
     } else {
-      const parsedLock = parseLockfile(lockRaw);
-      lockRoot = parsedLock.root;
+      const parsedLock = parseLockfileFor(choice.found, lockRaw, manifest);
       locked = parsedLock.locked;
-      packageEntries = parsedLock.packageEntries;
       if (parsedLock.error) {
         findings.push(
           createRuleFinding({
             ruleId: "node/lockfile-syntax",
-            stableIdentity: "package-lock.json:syntax",
-            summary: `package-lock.json could not be parsed: ${parsedLock.error}`,
-            location: location("package-lock.json")
+            stableIdentity: `${choice.found.path}:syntax`,
+            summary: `${choice.found.path} could not be parsed: ${parsedLock.error}`,
+            location: location(choice.found.path),
+            evidence: [
+              { label: "regenerate", value: LOCKFILE_REGENERATE[packageManager] }
+            ]
           })
         );
-      } else {
-        const mismatches = validateLockAgreement(
-          manifest,
-          lockRoot,
-          packageEntries
-        );
-        for (const mismatch of mismatches) {
-          findings.push(
-            createRuleFinding({
-              ruleId: "node/lockfile-sync",
-              stableIdentity: `${mismatch.scope}\0${mismatch.name}`,
-              summary: mismatch.actual === null ? mismatch.scope === "packages" ? `${mismatch.name} is missing from package-lock.json packages.` : `${mismatch.scope}.${mismatch.name} is missing from the root lockfile metadata.` : `${mismatch.scope}.${mismatch.name} is ${mismatch.expected} in package.json and ${mismatch.actual} in package-lock.json.`,
-              location: location("package-lock.json"),
-              evidence: [
-                { label: "expected", value: mismatch.expected },
-                { label: "actual", value: mismatch.actual }
-              ]
-            })
-          );
+      } else if (parsedLock.checked) {
+        for (const mismatch of parsedLock.mismatches) {
+          findings.push(mismatchFinding(choice.found, mismatch));
         }
-        if (mismatches.length === 0) {
+        if (parsedLock.mismatches.length === 0) {
           configured.push({
-            area: "npm lockfile",
+            area: `${packageManager} lockfile`,
             evidence: "root declarations agree and direct dependency package entries exist"
           });
         }
@@ -13417,9 +13800,59 @@ async function validateNodeProject(root, files) {
   }
   return {
     findings,
-    node: { manifest, scripts, declared, locked },
+    node: { manifest, packageManager, scripts, declared, locked },
     configured
   };
+}
+function parseLockfileFor(lockfile, raw, manifest) {
+  switch (lockfile.path) {
+    case "pnpm-lock.yaml":
+      return parsePnpmLockfile(raw, manifest);
+    case "yarn.lock":
+      return parseYarnLockfile(raw, manifest);
+    case "bun.lock":
+      return parseBunLockfile(raw, manifest);
+    case "bun.lockb":
+      return UNCHECKED_LOCKFILE;
+    default: {
+      const parsed = parseLockfile(raw);
+      if (parsed.error) {
+        return { error: parsed.error, locked: /* @__PURE__ */ new Map(), mismatches: [], checked: true };
+      }
+      return {
+        error: null,
+        locked: parsed.locked,
+        mismatches: validateLockAgreement(manifest, parsed.root, parsed.packageEntries),
+        checked: true
+      };
+    }
+  }
+}
+function mismatchFinding(lockfile, mismatch) {
+  const path2 = lockfile.path;
+  let summary;
+  if (mismatch.actual === null) {
+    if (mismatch.scope === "packages") {
+      summary = `${mismatch.name} is missing from ${path2}${lockfile.manager === "npm" ? " packages" : ""}.`;
+    } else if (mismatch.scope === "root") {
+      summary = `${mismatch.name} is missing from ${path2}.`;
+    } else {
+      summary = `${mismatch.scope}.${mismatch.name} is missing from the root lockfile metadata.`;
+    }
+  } else {
+    summary = `${mismatch.scope}.${mismatch.name} is ${mismatch.expected} in package.json and ${mismatch.actual} in ${path2}.`;
+  }
+  return createRuleFinding({
+    ruleId: "node/lockfile-sync",
+    stableIdentity: `${mismatch.scope}\0${mismatch.name}`,
+    summary,
+    location: location(path2),
+    evidence: [
+      { label: "expected", value: mismatch.expected },
+      { label: "actual", value: mismatch.actual },
+      { label: "regenerate", value: LOCKFILE_REGENERATE[lockfile.manager] }
+    ]
+  });
 }
 
 // src/validation/workflows.ts
@@ -13635,7 +14068,7 @@ async function validateWorkflows(root, files, inventory, node) {
   }
   if (node.manifest !== null) {
     const workflowRoots = pullRequestWorkflows.flatMap(
-      (workflow) => workflowRuns(workflow.value).flatMap(invokedNpmScripts)
+      (workflow) => workflowRuns(workflow.value).flatMap(invokedPackageScripts)
     );
     const reached = reachableScripts(workflowRoots, node.scripts);
     for (const script of REQUIRED_NODE_SCRIPTS) {
@@ -13644,7 +14077,7 @@ async function validateWorkflows(root, files, inventory, node) {
         createRuleFinding({
           ruleId: "workflow/script-wiring",
           stableIdentity: script,
-          summary: `The ${script} script exists but no pull-request workflow invokes it, directly or through another npm script.`,
+          summary: `The ${script} script exists but no pull-request workflow invokes it, directly or through another package script.`,
           location: location(
             pullRequestWorkflows[0]?.path ?? inventory.workflowFiles[0] ?? "package.json"
           ),
