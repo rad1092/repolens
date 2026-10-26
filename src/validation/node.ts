@@ -8,10 +8,25 @@ import {
   readTracked,
   type JsonObject,
 } from "./shared.js";
+import {
+  chooseLockfile,
+  declaredPackageManager,
+  LOCKFILE_REGENERATE,
+  parseBunLockfile,
+  parsePnpmLockfile,
+  parseYarnLockfile,
+  UNCHECKED_LOCKFILE,
+  type LockfileCandidate,
+  type LockMismatch,
+  type PackageManager,
+  type ParsedLockfile,
+} from "./lockfiles.js";
 import { isPlaceholderScript } from "./shell.js";
 
 export interface NodeContract {
   manifest: JsonObject | null;
+  /** The package manager whose lockfile was checked, npm when unknown. */
+  packageManager: PackageManager;
   scripts: Record<string, string>;
   declared: Map<string, { range: string; scope: string }>;
   locked: Map<string, string>;
@@ -252,62 +267,52 @@ export async function validateNodeProject(
     }
   }
 
-  const lockRaw = await readTracked(root, files, "package-lock.json");
-  let lockRoot: JsonObject | null = null;
+  const choice = chooseLockfile(files, declaredPackageManager(manifest));
+  const lockPath = choice.expected?.path ?? "package-lock.json";
+  const packageManager = choice.expected?.manager ?? "npm";
   let locked = new Map<string, string>();
-  let packageEntries = new Set<string>();
   if (manifest !== null) {
-    if (lockRaw === null) {
+    const lockRaw = choice.found
+      ? await readTracked(root, files, choice.found.path)
+      : null;
+    if (lockRaw === null || choice.found === null) {
       findings.push(
         createRuleFinding({
           ruleId: "node/lockfile-syntax",
-          stableIdentity: "package-lock.json:missing",
-          summary: "package-lock.json is missing for the root Node project.",
+          // npm keeps its original identity so existing baselines still match.
+          stableIdentity:
+            packageManager === "npm" ? "package-lock.json:missing" : `${lockPath}:missing`,
+          summary: choice.expected
+            ? `${lockPath} is missing for the root Node project.`
+            : "No lockfile was found for the root Node project (package-lock.json, pnpm-lock.yaml, yarn.lock or bun.lock).",
           location: location("package.json"),
+          evidence: [
+            { label: "regenerate", value: LOCKFILE_REGENERATE[packageManager] },
+          ],
         }),
       );
     } else {
-      const parsedLock = parseLockfile(lockRaw);
-      lockRoot = parsedLock.root;
+      const parsedLock = parseLockfileFor(choice.found, lockRaw, manifest);
       locked = parsedLock.locked;
-      packageEntries = parsedLock.packageEntries;
       if (parsedLock.error) {
         findings.push(
           createRuleFinding({
             ruleId: "node/lockfile-syntax",
-            stableIdentity: "package-lock.json:syntax",
-            summary: `package-lock.json could not be parsed: ${parsedLock.error}`,
-            location: location("package-lock.json"),
+            stableIdentity: `${choice.found.path}:syntax`,
+            summary: `${choice.found.path} could not be parsed: ${parsedLock.error}`,
+            location: location(choice.found.path),
+            evidence: [
+              { label: "regenerate", value: LOCKFILE_REGENERATE[packageManager] },
+            ],
           }),
         );
-      } else {
-        const mismatches = validateLockAgreement(
-          manifest,
-          lockRoot,
-          packageEntries,
-        );
-        for (const mismatch of mismatches) {
-          findings.push(
-            createRuleFinding({
-              ruleId: "node/lockfile-sync",
-              stableIdentity: `${mismatch.scope}\0${mismatch.name}`,
-              summary:
-                mismatch.actual === null
-                  ? mismatch.scope === "packages"
-                    ? `${mismatch.name} is missing from package-lock.json packages.`
-                    : `${mismatch.scope}.${mismatch.name} is missing from the root lockfile metadata.`
-                  : `${mismatch.scope}.${mismatch.name} is ${mismatch.expected} in package.json and ${mismatch.actual} in package-lock.json.`,
-              location: location("package-lock.json"),
-              evidence: [
-                { label: "expected", value: mismatch.expected },
-                { label: "actual", value: mismatch.actual },
-              ],
-            }),
-          );
+      } else if (parsedLock.checked) {
+        for (const mismatch of parsedLock.mismatches) {
+          findings.push(mismatchFinding(choice.found, mismatch));
         }
-        if (mismatches.length === 0) {
+        if (parsedLock.mismatches.length === 0) {
           configured.push({
-            area: "npm lockfile",
+            area: `${packageManager} lockfile`,
             evidence:
               "root declarations agree and direct dependency package entries exist",
           });
@@ -343,7 +348,64 @@ export async function validateNodeProject(
 
   return {
     findings,
-    node: { manifest, scripts, declared, locked },
+    node: { manifest, packageManager, scripts, declared, locked },
     configured,
   };
+}
+
+function parseLockfileFor(
+  lockfile: LockfileCandidate,
+  raw: string,
+  manifest: JsonObject,
+): ParsedLockfile {
+  switch (lockfile.path) {
+    case "pnpm-lock.yaml":
+      return parsePnpmLockfile(raw, manifest);
+    case "yarn.lock":
+      return parseYarnLockfile(raw, manifest);
+    case "bun.lock":
+      return parseBunLockfile(raw, manifest);
+    case "bun.lockb":
+      // Binary lockfile; `bun install --save-text-lockfile` writes bun.lock.
+      return UNCHECKED_LOCKFILE;
+    default: {
+      const parsed = parseLockfile(raw);
+      if (parsed.error) {
+        return { error: parsed.error, locked: new Map(), mismatches: [], checked: true };
+      }
+      return {
+        error: null,
+        locked: parsed.locked,
+        mismatches: validateLockAgreement(manifest, parsed.root, parsed.packageEntries),
+        checked: true,
+      };
+    }
+  }
+}
+
+function mismatchFinding(lockfile: LockfileCandidate, mismatch: LockMismatch) {
+  const path = lockfile.path;
+  let summary: string;
+  if (mismatch.actual === null) {
+    if (mismatch.scope === "packages") {
+      summary = `${mismatch.name} is missing from ${path}${lockfile.manager === "npm" ? " packages" : ""}.`;
+    } else if (mismatch.scope === "root") {
+      summary = `${mismatch.name} is missing from ${path}.`;
+    } else {
+      summary = `${mismatch.scope}.${mismatch.name} is missing from the root lockfile metadata.`;
+    }
+  } else {
+    summary = `${mismatch.scope}.${mismatch.name} is ${mismatch.expected} in package.json and ${mismatch.actual} in ${path}.`;
+  }
+  return createRuleFinding({
+    ruleId: "node/lockfile-sync",
+    stableIdentity: `${mismatch.scope}\0${mismatch.name}`,
+    summary,
+    location: location(path),
+    evidence: [
+      { label: "expected", value: mismatch.expected },
+      { label: "actual", value: mismatch.actual },
+      { label: "regenerate", value: LOCKFILE_REGENERATE[lockfile.manager] },
+    ],
+  });
 }

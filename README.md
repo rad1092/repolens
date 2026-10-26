@@ -1,66 +1,65 @@
 # RepoLens
 
-RepoLens is a read-only regression gate for the maintenance contract of Node
-repositories that use GitHub Actions.
-
-It answers one question on a pull request: did this change introduce a new
-repository-maintenance problem?
-
-RepoLens validates the repository state, records reviewed existing debt in a
-compact baseline, and reports only new or worsened findings as annotations and
-SARIF. It does not execute project scripts or replace security, code-quality,
-or dependency-update tools.
+RepoLens fails a pull request that adds a new maintenance problem to a Node
+repository on GitHub Actions: an unpinned action, a write-scoped token, a
+`test`, `lint` or `build` script that CI never runs, a lockfile that disagrees
+with `package.json`, a gap in Dependabot. Problems that already exist are
+reviewed once and recorded in a baseline, so they don't block anyone.
 
 Product guide: [https://repolens.whago.net/](https://repolens.whago.net/)
 
-The website is documentation and a download route. Repository inspection runs
-only in the installed CLI or the pinned GitHub Action; RepoLens does not upload
-a repository to the website.
+## RepoLens and OpenSSF Scorecard
+
+[Scorecard](https://github.com/ossf/scorecard) checks several of the same
+things. The difference is what each one reports.
+
+| | RepoLens | OpenSSF Scorecard |
+| --- | --- | --- |
+| Reports | Only what this pull request made worse than the reviewed baseline | A 0 to 10 rating for the whole repository |
+| Existing problems | Accepted once with a reason, owner and expiry | Counted on every run |
+| Who can accept a problem | The baseline is read from the base branch, so a pull request cannot approve its own regression | Not applicable |
+| Checks both have | Pinned actions, token permissions, Dependabot coverage | Pinned-Dependencies, Token-Permissions, Dependency-Update-Tool |
+| Only here | `test`/`lint`/`build` scripts reachable from a PR workflow, `package.json` and lockfile agreement (npm, pnpm, Yarn, Bun), tracked `.env` files | Branch protection, code review, maintenance activity, signed releases, fuzzing, SAST |
+| Output | Annotations on new findings, job summary, SARIF | SARIF, badge, public results API |
+
+Use Scorecard for the overall picture and RepoLens as the merge gate that keeps
+a pull request from making it worse.
+
+The website is documentation only. Repository inspection runs in the CLI or
+the pinned GitHub Action; nothing is uploaded.
 
 ## Install
 
-Node.js 20.11 or newer is required.
+Node.js 20.11 or newer.
 
-### Current public release: v0.3.0
+```sh
+npx @rad1092/repolens setup .
+```
 
-The current public release is v0.3.0:
+Or install it:
+
+```sh
+npm install --global @rad1092/repolens
+repolens --version
+```
+
+The npm package is published from the release workflow with npm provenance.
+Each GitHub Release also carries the package tarball, its SHA-256 digest and a
+build attestation:
 
 ```sh
 npm install --global \
-  https://github.com/rad1092/repolens/releases/download/v0.3.0/rad1092-repolens-0.3.0.tgz
-repolens --version
+  https://github.com/rad1092/repolens/releases/download/v0.4.0/rad1092-repolens-0.4.0.tgz
 ```
 
-### Next release source: v0.4.0
-
-This repository currently contains the next v0.4.0 source. It has not been
-published as a GitHub Release. From a reviewed source checkout, run the complete
-gate before linking the development build:
-
-```sh
-npm ci
-npm run check
-npm link
-repolens --version
-```
-
-The unscoped `repolens` name on npm belongs to another project. This package is
-named `@rad1092/repolens`.
-
-The scoped package is intended for GitHub Release distribution rather than the
-npm registry. The tag workflow refuses to publish unless repository release
-immutability is already enabled, then publishes the package with its SHA-256
-digest. Download the tarball, compare that digest, and install the verified
-local file when your environment requires an explicit supply-chain check.
+The unscoped `repolens` name on npm belongs to another project.
 
 ## Start the gate
 
 Run setup once from a committed Git repository:
 
 ```sh
-repolens setup . \
-  --reason "Existing maintenance findings reviewed before enabling the gate" \
-  --owner "Repository maintainers"
+repolens setup .
 ```
 
 Setup writes exactly three files:
@@ -69,11 +68,21 @@ Setup writes exactly three files:
 - `.repolens/baselines/accepted.json` — compact baseline schema v3
 - `.github/workflows/repolens.yml` — SHA-pinned pull-request gate
 
-If `--expires` is omitted, setup uses a 90-day review window. The generated
-workflow reads its gate policy from `.repolens.json` instead of duplicating it.
+The baseline records who accepted the current findings, why, and until when.
+By default the owner is your `git config user.name`, the reason is an initial
+review note and the acceptance expires in 90 days. Teams can set them:
 
-Setup resolves the immutable commit behind the matching RepoLens release tag.
-Before that tag exists, pass a reviewed full commit explicitly with
+```sh
+repolens setup . \
+  --owner "Platform team" \
+  --reason "Existing findings reviewed in maintenance review 42" \
+  --expires 6m
+```
+
+`--expires` takes an RFC 3339 time or a duration such as `30d`, `12w`, `6m`
+or `1y`. The generated workflow reads its gate policy from `.repolens.json`
+instead of duplicating it, and pins the RepoLens Action to the commit behind
+this release's tag. To pin a different reviewed commit, pass
 `--action-sha <40-character-sha>`.
 
 Review the files, then commit them in a change separate from future debt
@@ -97,16 +106,16 @@ regressions.
 
 ## What it validates
 
-RepoLens v0.4 deliberately covers a small contract:
+RepoLens v0.4 covers a small contract:
 
 | Rule area | Validation |
 | --- | --- |
 | GitHub Actions | YAML parses; a pull-request trigger exists; token permissions are explicit and read-only |
 | Action supply chain | Third-party `uses:` references are pinned to full commit SHAs |
-| CI wiring | Real `test`, `lint`, and `build` scripts are reachable from a pull-request workflow |
+| CI wiring | Real `test`, `lint`, and `build` scripts are reachable from a pull-request workflow through `npm`, `pnpm`, `yarn` or `bun run` |
 | Node manifest | `package.json` parses and verification scripts are not placeholders |
-| npm lockfile | `package-lock.json` parses, root declarations agree, and every direct dependency has a package entry |
-| Dependency automation | Dependabot v2 parses and covers npm plus GitHub Actions at the repository root |
+| Lockfile | The lockfile of the package manager in use (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` or text `bun.lock`) parses, agrees with `package.json`, and has an entry for every direct dependency. `packageManager` in `package.json` decides which one is expected. Binary `bun.lockb` is not read |
+| Dependency automation | Dependabot v2 parses and covers npm (or bun) plus GitHub Actions at the repository root |
 | Credential filename risk | Tracked `.env`-style files are reported without reading or printing their values |
 | Update context | Declared, locked, latest, and change type are shown for the updater to review |
 
@@ -116,6 +125,7 @@ configuration and traces script wiring, but labels configured commands as
 
 Use dedicated tools for the analysis they own:
 
+- OpenSSF Scorecard for an overall security posture rating
 - actionlint for complete GitHub Actions linting
 - zizmor for GitHub Actions security analysis
 - CodeQL, Semgrep, or SonarQube for source analysis
@@ -163,8 +173,7 @@ The v3 baseline records the source report hash as migration provenance.
 
 ## Configuration
 
-The next-release v0.4 source writes schema 2. Its versioned schema URL becomes
-available when the v0.4.0 tag is published:
+v0.4 writes config schema 2:
 
 ```json
 {
@@ -259,13 +268,15 @@ checkout, configuration, or report.
 
 ## Release artifacts
 
-The tag workflow can publish three artifacts:
+The tag workflow publishes three release artifacts and the npm package:
 
 - `rad1092-repolens-<version>.tgz` — installable CLI package
 - `SHA256SUMS` — digest for the package bytes
 - `manifest.json` — package name, version, size, integrity, runtime, and digest
 
-Publication is fail-closed. Before the release job can run:
+The tag workflow refuses to publish unless repository release
+immutability is already enabled. Publication is fail-closed. Before the
+release job can run:
 
 - Node 20.11, 22, and 24 must each pass the CLI, Action, package, and report gate.
 - The tag commit must already belong to the default branch history.
@@ -285,7 +296,9 @@ identical SHA-256 digests. It installs the tarball into an empty prefix and runs
 the packaged CLI through offline HTML, JSON, and SARIF reports plus exit codes
 `0`, `1`, and `2`. The workflow signs SLSA build provenance with GitHub artifact
 attestations and verifies that GitHub reports the published release as
-immutable. After v0.4.0 is published, verify its downloaded package with:
+immutable. When the `NPM_TOKEN` secret is set, the same verified tarball is
+published to npm with `npm publish --provenance`. Verify a downloaded package
+with:
 
 ```sh
 gh attestation verify rad1092-repolens-0.4.0.tgz \

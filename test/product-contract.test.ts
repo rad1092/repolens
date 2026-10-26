@@ -89,8 +89,7 @@ test("documents the v0.4 regression gate without stale score or mutable Action g
     scripts?: Record<string, string>;
   };
   const schema = JSON.parse(schemaRaw) as { $id?: string };
-  const nextRelease = `v${packageJson.version}`;
-  const currentPublicRelease = "v0.3.0";
+  const currentPublicRelease = `v${packageJson.version}`;
   const release = parseYaml(releaseWorkflow) as {
     jobs?: {
       verify?: {
@@ -128,10 +127,9 @@ test("documents the v0.4 regression gate without stale score or mutable Action g
   assert.match(readme, /IMMUTABLE_RELEASES_READ_TOKEN/);
   assert.match(readme, /existing\s+releases are not changed retroactively/);
   assert.match(readme, /Node 20\.11, 22, and 24/);
-  assert.match(readme, /Current public release: v0\.3\.0/);
-  assert.match(readme, /Next release source: v0\.4\.0/);
-  assert.match(readme, /It has not been\s+published as a GitHub Release/);
-  assert.match(readme, /npm run check/);
+  assert.match(readme, /npx @rad1092\/repolens setup \./);
+  assert.match(readme, /OpenSSF Scorecard/);
+  assert.match(readme, /pnpm-lock\.yaml/);
   assert.match(
     readme,
     new RegExp(
@@ -141,13 +139,6 @@ test("documents the v0.4 regression gate without stale score or mutable Action g
   assert.match(
     landing,
     new RegExp(`releases/tag/${currentPublicRelease}`),
-  );
-  assert.match(landing, /next v0\.4\.0 source/i);
-  assert.doesNotMatch(
-    publicCopy,
-    new RegExp(
-      `github\\.com/rad1092/repolens/releases/(?:download|tag)/${nextRelease}(?:/|["')])`,
-    ),
   );
   assert.match(
     readme,
@@ -192,6 +183,7 @@ test("documents the v0.4 regression gate without stale score or mutable Action g
   );
   assert.match(releaseWorkflow, /subject-checksums: release\/SHA256SUMS/);
   assert.match(releaseWorkflow, /gh release create/);
+  assert.match(releaseWorkflow, /npm publish release\/\*\.tgz --provenance/);
   assert.match(releaseScript, /SHA256SUMS/);
   assert.match(releaseScript, /different SHA-256 digests/);
   assert.doesNotMatch(publicCopy, /\bScore\b|\bGrade\b|v0\.2\.0/);

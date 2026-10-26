@@ -77,6 +77,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          registry-url: https://registry.npmjs.org
 
       - name: Install locked dependencies
         run: npm ci
@@ -133,3 +134,13 @@ jobs:
             echo "::error title=Release immutability verification failed::GitHub did not report the published release as immutable."
             exit 1
           fi
+
+      - name: Publish to npm with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice title=npm publish skipped::Set the NPM_TOKEN secret to publish @rad1092/repolens to npm."
+            exit 0
+          fi
+          npm publish release/*.tgz --provenance --access public

@@ -25,7 +25,7 @@ const SAFE_UPDATE_INTERVALS = new Set([
 
 function validDependabotEntry(
   entry: unknown,
-  ecosystem: "npm" | "github-actions",
+  ecosystem: "npm" | "bun" | "github-actions",
 ): boolean {
   if (!isObject(entry) || entry["package-ecosystem"] !== ecosystem) {
     return false;
@@ -179,7 +179,10 @@ export async function validateDependabot(
 
   if (
     hasManifest &&
-    !dependabotUpdates.some((entry) => validDependabotEntry(entry, "npm"))
+    !dependabotUpdates.some(
+      (entry) =>
+        validDependabotEntry(entry, "npm") || validDependabotEntry(entry, "bun"),
+    )
   ) {
     findings.push(
       createRuleFinding({
