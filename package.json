@@ -54,7 +54,7 @@
     "access": "public"
   },
   "dependencies": {
-    "minimatch": "^10.2.6",
+    "minimatch": "^11.0.3",
     "semver": "^7.8.5",
     "yaml": "^2.9.1"
   },
